@@ -1,2 +1,4 @@
-# lumixengine_dx11
-DX11 renderer for Lumix Engine
+# DX11 renderer for Lumix Engine
+
+It's still work in progress. 
+
