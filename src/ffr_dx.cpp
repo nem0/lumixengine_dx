@@ -1022,11 +1022,14 @@ void swapBuffers(u32 w, u32 h)
 		d3d.default_framebuffer.render_targets[0]->Release();
 
 		ID3D11Texture2D* rt;
+		d3d.device_ctx->OMSetRenderTargets(0, nullptr, 0);
+		d3d.device_ctx->ClearState();
 		d3d.swapchain->ResizeBuffers(1, w, h, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
 		HRESULT hr = d3d.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
 		ASSERT(SUCCEEDED(hr));
 
 		hr = d3d.device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &d3d.default_framebuffer.render_targets[0]);
+		rt->Release();
 		ASSERT(SUCCEEDED(hr));
 		d3d.default_framebuffer.count = 1;
 		
