@@ -1,7 +1,7 @@
 #include "renderer/ffr/ffr.h"
-#include "../external/dx/glslang/Public/ShaderLang.h"
-#include "../external/dx/SPIRV/GlslangToSpv.h"
-#include "../external/dx/spirv_cross/spirv_hlsl.hpp"
+#include "../external/include/glslang/Public/ShaderLang.h"
+#include "../external/include/SPIRV/GlslangToSpv.h"
+#include "../external/include/spirv_cross/spirv_hlsl.hpp"
 #include "engine/array.h"
 #include "engine/crc32.h"
 #include "engine/log.h"
@@ -1823,15 +1823,17 @@ void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType 
 	} 
 
 	DXGI_FORMAT dxgi_index_type;
+	u32 offset_shift = 0;
 	switch(index_type) {
-		case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; break;
-		case DataType::U16: dxgi_index_type = DXGI_FORMAT_R16_UINT; break;
+		case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; offset_shift = 2; break;
+		case DataType::U16: dxgi_index_type = DXGI_FORMAT_R16_UINT; offset_shift = 1; break;
 	}
 
+	ASSERT((offset & (offset_shift - 1)) == 0);
 	ID3D11Buffer* b = d3d.buffers[d3d.current_index_buffer.value].buffer;
 	d3d.device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
 	d3d.device_ctx->IASetPrimitiveTopology(pt);
-	d3d.device_ctx->DrawIndexed(count, offset, 0);
+	d3d.device_ctx->DrawIndexed(count, offset >> offset_shift, 0);
 }
 
 void update(BufferHandle buffer, const void* data, size_t offset, size_t size) {
