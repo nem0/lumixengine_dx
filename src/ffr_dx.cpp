@@ -107,6 +107,7 @@ struct Buffer {
 	u8* mapped_ptr = nullptr;
 	u8* persistent = nullptr;
 	bool is_persistently_mapped = false;
+	bool is_constant_buffer = false;
 };
 
 struct Texture {
@@ -991,8 +992,7 @@ void* map(BufferHandle handle, size_t offset, size_t size, u32 flags)
 	}
 	else {
 	    D3D11_MAPPED_SUBRESOURCE msr;
-	    u32 d3d_flags = 0;
-	    d3d.device_ctx->Map(buffer.buffer, 0, map, d3d_flags, &msr);
+	    d3d.device_ctx->Map(buffer.buffer, 0, map, 0, &msr);
 		buffer.mapped_ptr = (u8*)msr.pData + offset;
 	}
 	return buffer.mapped_ptr;
@@ -1002,11 +1002,9 @@ void* map(BufferHandle handle, size_t offset, size_t size, u32 flags)
 void unmap(BufferHandle handle)
 {
 	Buffer& buffer = d3d.buffers[handle.value];
-	if (buffer.is_persistently_mapped) {
-		d3d.device_ctx->Unmap(buffer.buffer, 0);
-		buffer.mapped_ptr = nullptr;
-		buffer.is_persistently_mapped = false;
-	}
+	d3d.device_ctx->Unmap(buffer.buffer, 0);
+	buffer.is_persistently_mapped = false;
+	buffer.mapped_ptr = nullptr;
 }
 
 Backend getBackend() { return Backend::DX11; }
@@ -1069,21 +1067,27 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
     // TODO
     D3D11_BUFFER_DESC desc = {};
     desc.ByteWidth = (UINT)size;
-    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+	buffer.is_constant_buffer = flags & (u32)BufferFlags::UNIFORM_BUFFER;
     if(flags & (u32)BufferFlags::UNIFORM_BUFFER) {
 		desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; 
 	}
 	else {
 		desc.BindFlags = D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER; 
 	}
-	desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 	if (flags & (u32)BufferFlags::PERSISTENT) {
 		buffer.persistent = (u8*)d3d.allocator->allocate(size);
 	}
 
+	if (flags & (u32)BufferFlags::MAP_WRITE) {
+		desc.Usage = D3D11_USAGE_DYNAMIC;
+		desc.CPUAccessFlags |= D3D11_CPU_ACCESS_WRITE;
+	}
+	else if (flags & (u32)BufferFlags::DYNAMIC_STORAGE) {
+		desc.Usage = D3D11_USAGE_DYNAMIC;
+		desc.CPUAccessFlags |= D3D11_CPU_ACCESS_WRITE;
+	}
 #if 0
-	if (flags & (u32)BufferFlags::MAP_READ) desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-	if (flags & (u32)BufferFlags::MAP_WRITE) desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 	if (flags & (u32)BufferFlags::COHERENT) gl_flags |= GL_MAP_COHERENT_BIT;
 	if (flags & (u32)BufferFlags::DYNAMIC_STORAGE) gl_flags |= GL_DYNAMIC_STORAGE_BIT;
 #endif
@@ -1749,7 +1753,7 @@ void flushBuffer(BufferHandle buffer, size_t offset, size_t len) {
 
 	ASSERT(b.is_persistently_mapped);
 	D3D11_MAPPED_SUBRESOURCE msr;
-	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
+	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_NO_OVERWRITE, 0, &msr);
 	memcpy((u8*)msr.pData + offset, b.persistent + offset, len);
 	d3d.device_ctx->Unmap(b.buffer, 0);
 }
@@ -1844,7 +1848,7 @@ void update(BufferHandle buffer, const void* data, size_t offset, size_t size) {
 	const Buffer& b = d3d.buffers[buffer.value];
 	D3D11_MAPPED_SUBRESOURCE msr;
 	ASSERT(!b.mapped_ptr);
-	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
+	d3d.device_ctx->Map(b.buffer, 0, b.is_constant_buffer ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0, &msr);
 	memcpy((u8*)msr.pData + offset, data, size);
 	d3d.device_ctx->Unmap(b.buffer, 0);
 
