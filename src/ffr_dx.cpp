@@ -54,7 +54,6 @@ static void toWChar(WCHAR (&out)[N], const char* in)
     *cout = 0;
 }
 
-
 template <typename T, int MAX_COUNT>
 struct Pool
 {
@@ -110,7 +109,7 @@ struct Buffer {
 };
 
 struct Texture {
-	ID3D11Texture2D* texture;
+	ID3D11Texture2D* texture2D;
 	union {
 		ID3D11RenderTargetView* rtv;
 		struct {
@@ -732,6 +731,26 @@ static void try_load_renderdoc()
 	//FreeLibrary(lib);
 }
 
+// TODO
+void checkThread() {}
+QueryHandle createQuery() { return {}; }
+FenceHandle createFence() { return {}; }
+void waitClient(FenceHandle fence) {}
+void update(TextureHandle texture, u32 level, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {}
+void createTextureView(TextureHandle view, TextureHandle texture) {}
+void getTextureImage(ffr::TextureHandle texture, u32 size, void* buf) {}
+void startCapture() {}
+void stopCapture() {}
+void destroy(FenceHandle fence) {}
+void destroy(ProgramHandle program) {}
+void destroy(TextureHandle texture) {}
+void destroy(QueryHandle query) {}
+void queryTimestamp(QueryHandle query) {}
+u64 getQueryResult(QueryHandle query) {return {}; }
+bool isQueryReady(QueryHandle query) { /*ASSERT(false);*/ return {}; }
+void drawTriangleStripArraysInstanced(u32 offset, u32 indices_count, u32 instances_count) {}
+
+
 void preinit(IAllocator& allocator)
 {
 	try_load_renderdoc();
@@ -867,14 +886,12 @@ bool init(void* hwnd, bool debug) {
     return true;
 }
 
-
 void pushDebugGroup(const char* msg)
 {
     WCHAR tmp[128];
     toWChar(tmp, msg);
     d3d.annotation->BeginEvent(tmp);
 }
-
 
 void popDebugGroup()
 {
@@ -926,14 +943,14 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 				desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
 				desc.Texture2D.MipSlice = 0;
 				desc.Flags = D3D11_DSV_READ_ONLY_DEPTH;
-				d3d.device->CreateDepthStencilView((ID3D11Resource*)t.texture, &desc, &t.dsv_ro);
+				d3d.device->CreateDepthStencilView((ID3D11Resource*)t.texture2D, &desc, &t.dsv_ro);
 			}
 			else if(!t.dsv) {
 				D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
 				desc.Format = toDSViewFormat(t.dxgi_format);
 				desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
 				desc.Texture2D.MipSlice = 0;
-				d3d.device->CreateDepthStencilView((ID3D11Resource*)t.texture, &desc, &t.dsv);
+				d3d.device->CreateDepthStencilView((ID3D11Resource*)t.texture2D, &desc, &t.dsv);
 			}
 			d3d.current_framebuffer.depth_stencil = readonly_ds ? t.dsv_ro : t.dsv;
 		}
@@ -943,7 +960,7 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 				desc.Format = t.dxgi_format;
 				desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
 				desc.Texture2D.MipSlice = 0;
-			    d3d.device->CreateRenderTargetView((ID3D11Resource*)t.texture, &desc, &t.rtv);
+			    d3d.device->CreateRenderTargetView((ID3D11Resource*)t.texture2D, &desc, &t.rtv);
 			}
 			ASSERT(d3d.current_framebuffer.count < (u32)lengthOf(d3d.current_framebuffer.render_targets));
 			d3d.current_framebuffer.render_targets[d3d.current_framebuffer.count] = t.rtv;
@@ -957,7 +974,6 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 
     d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
 }
-
 
 void clear(u32 flags, const float* color, float depth)
 {
@@ -978,7 +994,6 @@ void clear(u32 flags, const float* color, float depth)
     }
 }
 
-
 void* map(BufferHandle handle, size_t size)
 {
     Buffer& buffer = d3d.buffers[handle.value];
@@ -995,11 +1010,13 @@ void* map(BufferHandle handle, size_t size)
 	return buffer.mapped_ptr;
 }
 
-
 void unmap(BufferHandle handle)
 {
 	Buffer& buffer = d3d.buffers[handle.value];
-	d3d.device_ctx->Unmap(buffer.buffer, 0);
+	ASSERT(buffer.mapped_ptr);
+	if(!buffer.persistent) {
+		d3d.device_ctx->Unmap(buffer.buffer, 0);
+	}
 	buffer.mapped_ptr = nullptr;
 }
 
@@ -1051,11 +1068,11 @@ void swapBuffers(u32 w, u32 h)
 
 		hr = d3d.device->CreateDepthStencilView((ID3D11Resource*)ds, &dsv_desc, &d3d.default_framebuffer.depth_stencil);
 		ASSERT(SUCCEEDED(hr));
+		ds->Release();
 
 		d3d.current_framebuffer = d3d.default_framebuffer;
 	}
 }
-
 
 void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 {
@@ -1088,7 +1105,6 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	}
 }
 
-
 ProgramHandle allocProgramHandle()
 {
 	MT::CriticalSectionLock lock(d3d.handle_mutex);
@@ -1103,7 +1119,6 @@ ProgramHandle allocProgramHandle()
 	return { (u32)id };
 }
 
-
 BufferHandle allocBufferHandle()
 {
 	MT::CriticalSectionLock lock(d3d.handle_mutex);
@@ -1117,7 +1132,6 @@ BufferHandle allocBufferHandle()
 	t = {};
 	return { (u32)id };
 }
-
 
 TextureHandle allocTextureHandle()
 {
@@ -1158,7 +1172,6 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 	hash = crc32(attributes, sizeof(Attribute) * attributes_count);
 	++attributes_count;
 }
-
 
 static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 	switch (format) {
@@ -1274,7 +1287,30 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	}
 
 	if (is_cubemap) {
-		//ASSERT(false);
+		D3D11_TEXTURE2D_DESC desc = {};
+
+		desc.Width = hdr.dwWidth;
+		desc.Height = hdr.dwHeight;
+		desc.ArraySize = 6;
+		desc.MipLevels = mip_count;
+		desc.CPUAccessFlags = 0;
+		desc.Format = is_srgb ? li->srgb_format : li->format;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		desc.MiscFlags = 0;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.SampleDesc.Count = 1;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+		texture.dxgi_format = desc.Format;
+		HRESULT hr = d3d.device->CreateTexture2D(&desc, srd, &texture.texture2D);
+		ASSERT(SUCCEEDED(hr));
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+		srv_desc.Format = toViewFormat(desc.Format);
+		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+		srv_desc.Texture3D.MipLevels = mip_count;
+
+		hr = d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
+		ASSERT(SUCCEEDED(hr));
 	} else if (layers > 1) {
 		ASSERT(false);
 	} else {
@@ -1290,14 +1326,16 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 		desc.SampleDesc.Count = 1;
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		texture.dxgi_format = desc.Format;
-		HRESULT hr = d3d.device->CreateTexture2D(&desc, srd, &texture.texture);
+		HRESULT hr = d3d.device->CreateTexture2D(&desc, srd, &texture.texture2D);
+		ASSERT(SUCCEEDED(hr));
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 		srv_desc.Format = toViewFormat(desc.Format);
 		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 		srv_desc.Texture2D.MipLevels = mip_count;
 
-		d3d.device->CreateShaderResourceView(texture.texture, &srv_desc, &texture.srv);
+		hr = d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
+		ASSERT(SUCCEEDED(hr));
 	}
 
 	/*
@@ -1485,15 +1523,15 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 				srd[idx].SysMemPitch = mip_w * bytes_per_pixel;
 			}
 		}
-		d3d.device->CreateTexture2D(&desc, srd, &texture.texture);
+		d3d.device->CreateTexture2D(&desc, srd, &texture.texture2D);
 	}
 	else {
-		d3d.device->CreateTexture2D(&desc, nullptr, &texture.texture);
+		d3d.device->CreateTexture2D(&desc, nullptr, &texture.texture2D);
 	}
-	ASSERT(texture.texture);
+	ASSERT(texture.texture2D);
 
 	if(debug_name && debug_name[0]) {
-		texture.texture->SetPrivateData(WKPDID_D3DDebugObjectName, stringLength(debug_name), debug_name);
+		texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, stringLength(debug_name), debug_name);
 	}
 
 	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
@@ -1501,10 +1539,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 	srv_desc.Texture2D.MipLevels = mip_count;
 
-	d3d.device->CreateShaderResourceView(texture.texture, &srv_desc, &texture.srv);
+	d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 	return false;
 }
-
 
 void setState(u64 state)
 {
@@ -1576,22 +1613,36 @@ void setState(u64 state)
 
 	u16 blend_bits = u16(state >> 6);
 
+	auto to_dx = [&](BlendFactors factor) -> D3D11_BLEND {
+		static const D3D11_BLEND table[] = {
+			D3D11_BLEND_ZERO,
+			D3D11_BLEND_ONE,
+			D3D11_BLEND_SRC_COLOR,
+			D3D11_BLEND_INV_SRC_COLOR,
+			D3D11_BLEND_SRC_ALPHA,
+			D3D11_BLEND_INV_SRC_ALPHA,
+			D3D11_BLEND_DEST_COLOR,
+			D3D11_BLEND_INV_DEST_COLOR,
+			D3D11_BLEND_DEST_ALPHA,
+			D3D11_BLEND_INV_DEST_ALPHA
+		};
+		return table[(int)factor];
+	};
+
 	for(u32 rt_idx = 0; rt_idx < (u32)lengthOf(blend_desc.RenderTarget); ++rt_idx) {
 		if (blend_bits) {
-			/*const BlendFactors src_rgb = (BlendFactors)(blend_bits & 0xf);
+			const BlendFactors src_rgb = (BlendFactors)(blend_bits & 0xf);
 			const BlendFactors dst_rgb = (BlendFactors)((blend_bits >> 4) & 0xf);
 			const BlendFactors src_a = (BlendFactors)((blend_bits >> 8) & 0xf);
 			const BlendFactors dst_a = (BlendFactors)((blend_bits >> 12) & 0xf);
-			glEnable(GL_BLEND);
-			glBlendFuncSeparate(to_gl(src_rgb), to_gl(dst_rgb), to_gl(src_a), to_gl(dst_a));*/
 		
 			blend_desc.RenderTarget[rt_idx].BlendEnable = true;
 			blend_desc.AlphaToCoverageEnable = false;
-			blend_desc.RenderTarget[rt_idx].SrcBlend = D3D11_BLEND_SRC_ALPHA;
-			blend_desc.RenderTarget[rt_idx].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+			blend_desc.RenderTarget[rt_idx].SrcBlend = to_dx(src_rgb);
+			blend_desc.RenderTarget[rt_idx].DestBlend = to_dx(dst_rgb);
 			blend_desc.RenderTarget[rt_idx].BlendOp = D3D11_BLEND_OP_ADD;
-			blend_desc.RenderTarget[rt_idx].SrcBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-			blend_desc.RenderTarget[rt_idx].DestBlendAlpha = D3D11_BLEND_ZERO;
+			blend_desc.RenderTarget[rt_idx].SrcBlendAlpha = to_dx(src_a);
+			blend_desc.RenderTarget[rt_idx].DestBlendAlpha = to_dx(dst_a);
 			blend_desc.RenderTarget[rt_idx].BlendOpAlpha = D3D11_BLEND_OP_ADD;
 			blend_desc.RenderTarget[rt_idx].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 		}
@@ -1600,8 +1651,8 @@ void setState(u64 state)
 			blend_desc.RenderTarget[rt_idx].SrcBlend = D3D11_BLEND_SRC_ALPHA;
 			blend_desc.RenderTarget[rt_idx].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
 			blend_desc.RenderTarget[rt_idx].BlendOp = D3D11_BLEND_OP_ADD;
-			blend_desc.RenderTarget[rt_idx].SrcBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-			blend_desc.RenderTarget[rt_idx].DestBlendAlpha = D3D11_BLEND_ZERO;
+			blend_desc.RenderTarget[rt_idx].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
+			blend_desc.RenderTarget[rt_idx].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
 			blend_desc.RenderTarget[rt_idx].BlendOpAlpha = D3D11_BLEND_OP_ADD;
 			blend_desc.RenderTarget[rt_idx].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 		}
@@ -1673,7 +1724,6 @@ void drawTriangles(u32 indices_count, DataType index_type) {
     d3d.device_ctx->DrawIndexed(indices_count, 0, 0);
 }
 
-
 void drawArrays(u32 offset, u32 count, PrimitiveType type)
 {
     D3D11_PRIMITIVE_TOPOLOGY topology;
@@ -1688,26 +1738,8 @@ void drawArrays(u32 offset, u32 count, PrimitiveType type)
     d3d.device_ctx->Draw(count, offset);
 }
 
-void checkThread() {}
-QueryHandle createQuery() { return {}; }
-FenceHandle createFence() { return {}; }
-void waitClient(FenceHandle fence) {}
-void update(TextureHandle texture, u32 level, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {}
-void createTextureView(TextureHandle view, TextureHandle texture) {}
-void getTextureImage(ffr::TextureHandle texture, u32 size, void* buf) {}
-void startCapture() {}
-void stopCapture() {}
 bool isHomogenousDepth() { return false; }
 bool isOriginBottomLeft() { return false; }
-void destroy(FenceHandle fence) {}
-void destroy(ProgramHandle program) {}
-void destroy(TextureHandle texture) {}
-void destroy(QueryHandle query) {}
-void queryTimestamp(QueryHandle query) {}
-u64 getQueryResult(QueryHandle query) {return {}; }
-bool isQueryReady(QueryHandle query) { /*ASSERT(false);*/ return {}; }
-void drawTriangleStripArraysInstanced(u32 offset, u32 indices_count, u32 instances_count) {}
-
 
 TextureInfo getTextureInfo(const void* data)
 {
@@ -1730,7 +1762,6 @@ TextureInfo getTextureInfo(const void* data)
 	
 	return info;
 }
-
 
 void flushBuffer(BufferHandle buffer, size_t len) {
 	checkThread();
@@ -1755,7 +1786,6 @@ void destroy(BufferHandle buffer) {
 	d3d.buffers.dealloc(buffer.value);
 }
 
-
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
 	ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
 	ASSERT(offset % 16 == 0);
@@ -1765,23 +1795,20 @@ void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t siz
 	d3d.device_ctx->PSSetConstantBuffers(index, 1, &b);
 }
 
-
 void bindIndexBuffer(BufferHandle handle) {
 	d3d.current_index_buffer = handle;
 }
-
 
 void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride_offset) {
 	ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
 	d3d.device_ctx->IASetVertexBuffers(binding_idx, 1, &b, &stride_offset, &buffer_offset);
 }
 
-
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	ID3D11ShaderResourceView* views[16];
 	ID3D11SamplerState* samplers[16];
 	for (u32 i = 0; i < count; ++i) {
-		views[i] = d3d.textures[handles[i].value].srv;
+		views[i] = handles[i].isValid() ? d3d.textures[handles[i].value].srv : nullptr;
 		samplers[i] = d3d.default_sampler;
 	}
 	d3d.device_ctx->VSSetShaderResources(offset, count, views);
@@ -1865,7 +1892,6 @@ static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
 	ASSERT(false);
 	return DXGI_FORMAT_R32_FLOAT;
 }
-
 
 static const TBuiltInResource DefaultTBuiltInResource = {
     /* .MaxLights = */ 32,
@@ -2017,7 +2043,6 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 	}
 	return false;
 }
-
 
 bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, int num, const char** prefixes, int prefixes_count, const char* name)
 {
