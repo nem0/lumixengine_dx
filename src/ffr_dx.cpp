@@ -130,6 +130,7 @@ struct InputLayout {
 };
 
 static struct {
+	DWORD thread;
 	RENDERDOC_API_1_0_2* rdoc_api;
 	IAllocator* allocator = nullptr;
     IDXGISwapChain* swapchain = nullptr;
@@ -725,8 +726,7 @@ static void flipCompressedTexture(int w, int h, DXGI_FORMAT format, void* surfac
 
 } // namespace DDS
 
-static void try_load_renderdoc()
-{
+static void try_load_renderdoc() {
 	HMODULE lib = LoadLibrary("renderdoc.dll");
 	if (!lib) return;
 	pRENDERDOC_GetAPI RENDERDOC_GetAPI = (pRENDERDOC_GetAPI)GetProcAddress(lib, "RENDERDOC_GetAPI");
@@ -738,8 +738,29 @@ static void try_load_renderdoc()
 	//FreeLibrary(lib);
 }
 
-// TODO
-void checkThread() {}
+static bool isDepthFormat(DXGI_FORMAT format) {
+	switch(format) {
+		case DXGI_FORMAT_R24G8_TYPELESS: return true;
+		case DXGI_FORMAT_R32_TYPELESS: return true;
+	}
+	return false;
+}
+
+static DXGI_FORMAT toViewFormat(DXGI_FORMAT format) {
+	switch(format) {
+		case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+		case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_R32_FLOAT;
+	}
+	return format;
+}
+
+static DXGI_FORMAT toDSViewFormat(DXGI_FORMAT format) {
+	switch(format) {
+		case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_D24_UNORM_S8_UINT;
+		case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_D32_FLOAT;
+	}
+	return format;
+}
 
 QueryHandle createQuery() {
 	checkThread();
@@ -751,10 +772,6 @@ QueryHandle createQuery() {
 	d3d.device->CreateQuery(&desc, &d3d.queries[idx].query);
 	return { (u32)idx }; 
 }
-
-void update(TextureHandle texture, u32 level, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {}
-void createTextureView(TextureHandle view, TextureHandle texture) {}
-void getTextureImage(ffr::TextureHandle texture, u32 size, void* buf) {}
 
 void startCapture()
 {
@@ -770,9 +787,60 @@ void stopCapture() {
 	}
 }
 
-void destroy(ProgramHandle program) {}
-void destroy(TextureHandle texture) {}
-void destroy(QueryHandle query) {}
+void checkThread() {
+	ASSERT(d3d.thread == GetCurrentThreadId());
+}
+
+void destroy(ProgramHandle program) {
+	checkThread();
+	
+	Program& p = d3d.programs[program.value];
+	if (p.gs) p.gs->Release();
+	if (p.ps) p.ps->Release();
+	if (p.vs) p.vs->Release();
+	if (p.il) p.il->Release();
+
+	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	d3d.programs.dealloc(program.value);
+}
+
+void destroy(TextureHandle texture) {
+	checkThread();
+	Texture& t = d3d.textures[texture.value];
+	if (t.srv) t.srv->Release();
+	
+	if (isDepthFormat(t.dxgi_format)) {
+		if (t.dsv_ro) t.dsv_ro->Release();
+		if (t.dsv) t.dsv->Release();
+	}
+	else {
+		if (t.rtv) t.rtv->Release();
+	}
+
+	t.texture2D->Release();
+
+	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	d3d.textures.dealloc(texture.value);
+}
+
+void destroy(QueryHandle query) {
+	checkThread();
+
+	d3d.queries[query.value].query->Release();
+
+	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	d3d.queries.dealloc(query.value);
+}
+
+void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
+	d3d.device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
+}
+
+
+// TODO
+void createTextureView(TextureHandle view, TextureHandle texture) {}
+void update(TextureHandle texture, u32 level, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {}
+void getTextureImage(ffr::TextureHandle texture, u32 size, void* buf) {}
 
 void queryTimestamp(QueryHandle query) {
 	checkThread();
@@ -797,9 +865,6 @@ bool isQueryReady(QueryHandle query) {
 	return res == S_OK;
 }
 
-void drawTriangleStripArraysInstanced(u32 offset, u32 indices_count, u32 instances_count) {}
-
-
 void preinit(IAllocator& allocator)
 {
 	try_load_renderdoc();
@@ -820,6 +885,7 @@ bool init(void* hwnd, bool debug) {
 		debug = true;
 	#endif
 
+	d3d.thread = GetCurrentThreadId();
 	ShInitialize();
 
     RECT rect;
@@ -969,30 +1035,6 @@ void pushDebugGroup(const char* msg)
 void popDebugGroup()
 {
     d3d.annotation->EndEvent();
-}
-
-static bool isDepthFormat(DXGI_FORMAT format) {
-	switch(format) {
-		case DXGI_FORMAT_R24G8_TYPELESS: return true;
-		case DXGI_FORMAT_R32_TYPELESS: return true;
-	}
-	return false;
-}
-
-static DXGI_FORMAT toViewFormat(DXGI_FORMAT format) {
-	switch(format) {
-		case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-		case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_R32_FLOAT;
-	}
-	return format;
-}
-
-static DXGI_FORMAT toDSViewFormat(DXGI_FORMAT format) {
-	switch(format) {
-		case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_D24_UNORM_S8_UINT;
-		case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_D32_FLOAT;
-	}
-	return format;
 }
 
 // TODO texture might get destroyed while framebuffer has rtv or dsv to it
@@ -1860,8 +1902,15 @@ void bindIndexBuffer(BufferHandle handle) {
 }
 
 void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride_offset) {
-	ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
-	d3d.device_ctx->IASetVertexBuffers(binding_idx, 1, &b, &stride_offset, &buffer_offset);
+	if(buffer.isValid()) {
+		ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
+		d3d.device_ctx->IASetVertexBuffers(binding_idx, 1, &b, &stride_offset, &buffer_offset);
+	}
+	else {
+		ID3D11Buffer* tmp = nullptr;
+		UINT tmp2 = 0;
+		d3d.device_ctx->IASetVertexBuffers(binding_idx, 1, &tmp, &tmp2, &tmp2);
+	}
 }
 
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
