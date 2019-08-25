@@ -104,7 +104,6 @@ struct Program {
 struct Buffer {
     ID3D11Buffer* buffer;
 	u8* mapped_ptr = nullptr;
-	u8* persistent = nullptr;
 	bool is_constant_buffer = false;
 };
 
@@ -999,14 +998,9 @@ void* map(BufferHandle handle, size_t size)
     Buffer& buffer = d3d.buffers[handle.value];
     D3D11_MAP map = D3D11_MAP_WRITE_DISCARD;
     ASSERT(!buffer.mapped_ptr);
-	if (buffer.persistent) {
-		buffer.mapped_ptr = buffer.persistent;
-	}
-	else {
-	    D3D11_MAPPED_SUBRESOURCE msr;
-	    d3d.device_ctx->Map(buffer.buffer, 0, map, 0, &msr);
-		buffer.mapped_ptr = (u8*)msr.pData;
-	}
+	D3D11_MAPPED_SUBRESOURCE msr;
+	d3d.device_ctx->Map(buffer.buffer, 0, map, 0, &msr);
+	buffer.mapped_ptr = (u8*)msr.pData;
 	return buffer.mapped_ptr;
 }
 
@@ -1014,9 +1008,7 @@ void unmap(BufferHandle handle)
 {
 	Buffer& buffer = d3d.buffers[handle.value];
 	ASSERT(buffer.mapped_ptr);
-	if(!buffer.persistent) {
-		d3d.device_ctx->Unmap(buffer.buffer, 0);
-	}
+	d3d.device_ctx->Unmap(buffer.buffer, 0);
 	buffer.mapped_ptr = nullptr;
 }
 
@@ -1086,9 +1078,6 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	else {
 		desc.BindFlags = D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER; 
 	}
-	if (flags & (u32)BufferFlags::PERSISTENT) {
-		buffer.persistent = (u8*)d3d.allocator->allocate(size);
-	}
 
 	if (flags & (u32)BufferFlags::IMMUTABLE) {
 		desc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1100,9 +1089,6 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	D3D11_SUBRESOURCE_DATA initial_data = {};
 	initial_data.pSysMem = data;
     d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer.buffer);
-	if(data && buffer.persistent) {
-		memcpy(buffer.persistent, data, size);
-	}
 }
 
 ProgramHandle allocProgramHandle()
@@ -1763,24 +1749,11 @@ TextureInfo getTextureInfo(const void* data)
 	return info;
 }
 
-void flushBuffer(BufferHandle buffer, size_t len) {
-	checkThread();
-	Buffer& b = d3d.buffers[buffer.value];
-
-	ASSERT(b.persistent && b.mapped_ptr);
-	D3D11_MAPPED_SUBRESOURCE msr;
-	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_NO_OVERWRITE, 0, &msr);
-	memcpy((u8*)msr.pData, b.persistent, len);
-	d3d.device_ctx->Unmap(b.buffer, 0);
-}
-
 void destroy(BufferHandle buffer) {
 	checkThread();
 	
 	Buffer& t = d3d.buffers[buffer.value];
 	t.buffer->Release();
-	if (t.persistent) d3d.allocator->deallocate(t.persistent);
-	t.persistent = nullptr;
 
 	MT::CriticalSectionLock lock(d3d.handle_mutex);
 	d3d.buffers.dealloc(buffer.value);
@@ -1858,7 +1831,6 @@ void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType 
 void update(BufferHandle buffer, const void* data, size_t size) {
 	checkThread();
 	const Buffer& b = d3d.buffers[buffer.value];
-	ASSERT(!b.persistent);
 	ASSERT(!b.mapped_ptr);
 	D3D11_MAPPED_SUBRESOURCE msr;
 	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
