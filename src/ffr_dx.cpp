@@ -121,6 +121,10 @@ struct Texture {
 	u32 flags = 0;
 };
 
+struct Query {
+	ID3D11Query* query;
+};
+
 struct InputLayout {
 	ID3D11InputLayout* layout;
 };
@@ -133,11 +137,15 @@ static struct {
     ID3D11Device* device = nullptr;
     ID3DUserDefinedAnnotation* annotation = nullptr;
 	ID3D11SamplerState* default_sampler = nullptr;
+	ID3D11Query* disjoint_query = nullptr;
+	bool disjoint_waiting = false;
+	u64 query_frequency = 1;
 	IVec2 size;
 
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	MT::CriticalSection handle_mutex;
-    Pool<Program, 256> programs;
+    Pool<Query, 2048> queries;
+	Pool<Program, 256> programs;
     Pool<Buffer, 256> buffers;
     Pool<Texture, 4096> textures;
 	Pool<InputLayout, 8192> input_layouts;
@@ -732,18 +740,63 @@ static void try_load_renderdoc()
 
 // TODO
 void checkThread() {}
-QueryHandle createQuery() { return {}; }
+
+QueryHandle createQuery() {
+	checkThread();
+	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	const int idx = d3d.queries.alloc();
+	d3d.queries[idx] = {};
+	D3D11_QUERY_DESC desc = {};
+	desc.Query = D3D11_QUERY_TIMESTAMP;
+	d3d.device->CreateQuery(&desc, &d3d.queries[idx].query);
+	return { (u32)idx }; 
+}
+
 void update(TextureHandle texture, u32 level, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {}
 void createTextureView(TextureHandle view, TextureHandle texture) {}
 void getTextureImage(ffr::TextureHandle texture, u32 size, void* buf) {}
-void startCapture() {}
-void stopCapture() {}
+
+void startCapture()
+{
+	if (d3d.rdoc_api) {
+		d3d.rdoc_api->StartFrameCapture(nullptr, nullptr);
+	}
+}
+
+
+void stopCapture() {
+	if (d3d.rdoc_api) {
+		d3d.rdoc_api->EndFrameCapture(nullptr, nullptr);
+	}
+}
+
 void destroy(ProgramHandle program) {}
 void destroy(TextureHandle texture) {}
 void destroy(QueryHandle query) {}
-void queryTimestamp(QueryHandle query) {}
-u64 getQueryResult(QueryHandle query) {return {}; }
-bool isQueryReady(QueryHandle query) { /*ASSERT(false);*/ return {}; }
+
+void queryTimestamp(QueryHandle query) {
+	checkThread();
+	d3d.device_ctx->End(d3d.queries[query.value].query);
+}
+
+u64 getQueryFrequency() { return d3d.query_frequency; }
+
+u64 getQueryResult(QueryHandle query) {
+	checkThread();
+	ID3D11Query* q = d3d.queries[query.value].query;
+	u64 time;
+	const HRESULT res = d3d.device_ctx->GetData(q, &time, sizeof(time), 0);
+	ASSERT(res == S_OK);
+	return time;
+}
+
+bool isQueryReady(QueryHandle query) { 
+	checkThread();
+	ID3D11Query* q = d3d.queries[query.value].query;
+	const HRESULT res = d3d.device_ctx->GetData(q, nullptr, 0, 0);
+	return res == S_OK;
+}
+
 void drawTriangleStripArraysInstanced(u32 offset, u32 indices_count, u32 instances_count) {}
 
 
@@ -754,6 +807,7 @@ void preinit(IAllocator& allocator)
 	d3d.textures.create(*d3d.allocator);
 	d3d.buffers.create(*d3d.allocator);
 	d3d.programs.create(*d3d.allocator);
+	d3d.queries.create(*d3d.allocator);
 }
 
 void shutdown() {
@@ -878,6 +932,29 @@ bool init(void* hwnd, bool debug) {
 		}
 
 	}
+
+	D3D11_QUERY_DESC query_desc = {};
+	query_desc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+	d3d.device->CreateQuery(&query_desc, &d3d.disjoint_query);
+	d3d.device_ctx->Begin(d3d.disjoint_query);
+	d3d.device_ctx->End(d3d.disjoint_query);
+	u32 try_num = 0;
+	while (S_OK != d3d.device_ctx->GetData(d3d.disjoint_query, nullptr, 0, 0) && try_num < 1000) {
+		Sleep(1);
+		++try_num;
+	}
+	if(try_num == 1000) {
+		logError("ffr") << "Failed to get GPU query frequency. All timings are unreliable.";
+		d3d.query_frequency = 1'000'000'000;
+	}
+	else {
+		D3D11_QUERY_DATA_TIMESTAMP_DISJOINT data;
+		d3d.device_ctx->GetData(d3d.disjoint_query, &data, sizeof(data), 0);
+		d3d.query_frequency = data.Frequency;
+	}
+
+	d3d.device_ctx->Begin(d3d.disjoint_query);
+	d3d.disjoint_waiting = false;
 
     return true;
 }
@@ -1014,6 +1091,19 @@ Backend getBackend() { return Backend::DX11; }
 void swapBuffers(u32 w, u32 h)
 {
     d3d.swapchain->Present(1, 0);
+	if(d3d.disjoint_waiting) {
+		D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint_query_data;
+		const HRESULT res = d3d.device_ctx->GetData(d3d.disjoint_query, &disjoint_query_data, sizeof(disjoint_query_data), 0);
+		if (res == S_OK && disjoint_query_data.Disjoint == FALSE) {
+			d3d.query_frequency = disjoint_query_data.Frequency;
+			d3d.device_ctx->Begin(d3d.disjoint_query);
+			d3d.disjoint_waiting = false;
+		}
+	}
+	else {
+		d3d.device_ctx->End(d3d.disjoint_query);
+		d3d.disjoint_waiting = true;
+	}
 
 	const IVec2 size(w, h);
 	if(size != d3d.size) {
