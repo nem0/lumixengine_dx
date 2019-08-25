@@ -733,14 +733,11 @@ static void try_load_renderdoc()
 // TODO
 void checkThread() {}
 QueryHandle createQuery() { return {}; }
-FenceHandle createFence() { return {}; }
-void waitClient(FenceHandle fence) {}
 void update(TextureHandle texture, u32 level, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {}
 void createTextureView(TextureHandle view, TextureHandle texture) {}
 void getTextureImage(ffr::TextureHandle texture, u32 size, void* buf) {}
 void startCapture() {}
 void stopCapture() {}
-void destroy(FenceHandle fence) {}
 void destroy(ProgramHandle program) {}
 void destroy(TextureHandle texture) {}
 void destroy(QueryHandle query) {}
