@@ -2152,7 +2152,7 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 	return false;
 }
 
-bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, int num, const char** prefixes, int prefixes_count, const char* name)
+bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name)
 {
     Program& program = d3d.programs[handle.value];
 	program = {};
@@ -2177,7 +2177,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 
 	const char* tmp[128];
 	auto filter_srcs = [&](ShaderType type) {
-		for(u32 i = 0; i < (u32)prefixes_count; ++i) {
+		for(u32 i = 0; i < prefixes_count; ++i) {
 			tmp[i] = prefixes[i];
 		}
 		for (u32 i = 0; i < decl.attributes_count; ++i) {
@@ -2185,7 +2185,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 		}
 
 		u32 sc = 0;
-		for(u32 i = 0; i < (u32)num; ++i) {
+		for(u32 i = 0; i < num; ++i) {
 			if(types[i] != type) continue;
 			tmp[prefixes_count + decl.attributes_count + sc] = srcs[i];
 			++sc;
