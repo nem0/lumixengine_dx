@@ -1,4 +1,4 @@
-#include "renderer/ffr/ffr.h"
+#include "renderer/gpu/gpu.h"
 #include "../external/include/glslang/Public/ShaderLang.h"
 #include "../external/include/SPIRV/GlslangToSpv.h"
 #include "../external/include/spirv_cross/spirv_hlsl.hpp"
@@ -14,7 +14,7 @@
 #include <d3dcompiler.h>
 #include <cassert>
 #include <malloc.h>
-#include "renderer/ffr/renderdoc_app.h"
+#include "renderer/gpu/renderdoc_app.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "glslang.lib")
@@ -38,7 +38,7 @@ static const GUID IID_ID3DUserDefinedAnnotation = { 0xb2daad8b, 0x03d4, 0x4dbf, 
 
 namespace Lumix {
 
-namespace ffr {
+namespace gpu {
 
 
 template <int N>
@@ -147,7 +147,7 @@ static struct {
 	MT::CriticalSection handle_mutex;
     Pool<Query, 2048> queries;
 	Pool<Program, 256> programs;
-    Pool<Buffer, 256> buffers;
+    Pool<Buffer, 8192> buffers;
     Pool<Texture, 4096> textures;
 	Pool<InputLayout, 8192> input_layouts;
    	struct FrameBuffer {
@@ -502,12 +502,15 @@ static LoadInfo* getDXT10LoadInfo(const Header& hdr, const DXT10Header& dxt10_hd
 			return &loadInfoBGRA8;
 		case DXGI_FORMAT_R8G8B8A8_UNORM:
 			return &loadInfoRGBA8;
+		case DXGI_FORMAT_BC1_UNORM_SRGB:
 		case DXGI_FORMAT_BC1_UNORM:
 			return &loadInfoDXT1;
 			break;
+		case DXGI_FORMAT_BC2_UNORM_SRGB:
 		case DXGI_FORMAT_BC2_UNORM:
 			return &loadInfoDXT3;
 			break;
+		case DXGI_FORMAT_BC3_UNORM_SRGB:
 		case DXGI_FORMAT_BC3_UNORM:
 			return &loadInfoDXT5;
 			break;
@@ -840,7 +843,7 @@ void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
 // TODO
 void createTextureView(TextureHandle view, TextureHandle texture) {}
 void update(TextureHandle texture, u32 level, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {}
-void getTextureImage(ffr::TextureHandle texture, u32 size, void* buf) {}
+void getTextureImage(TextureHandle texture, u32 size, void* buf) {}
 
 void queryTimestamp(QueryHandle query) {
 	checkThread();
@@ -880,7 +883,8 @@ void shutdown() {
 	// TODO
 }
 
-bool init(void* hwnd, bool debug) {
+bool init(void* hwnd, u32 flags) {
+	bool debug = flags & (u32)InitFlags::DEBUG_OUTPUT;
 	#ifdef LUMIX_DEBUG
 		debug = true;
 	#endif
@@ -1010,7 +1014,7 @@ bool init(void* hwnd, bool debug) {
 		++try_num;
 	}
 	if(try_num == 1000) {
-		logError("ffr") << "Failed to get GPU query frequency. All timings are unreliable.";
+		logError("gpu") << "Failed to get GPU query frequency. All timings are unreliable.";
 		d3d.query_frequency = 1'000'000'000;
 	}
 	else {
@@ -1040,7 +1044,7 @@ void popDebugGroup()
 // TODO texture might get destroyed while framebuffer has rtv or dsv to it
 void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 	checkThread();
-	const bool readonly_ds = flags & (u32)ffr::FramebufferFlags::READONLY_DEPTH_STENCIL;
+	const bool readonly_ds = flags & (u32)FramebufferFlags::READONLY_DEPTH_STENCIL;
 	if (!attachments) {
 		d3d.current_framebuffer = d3d.default_framebuffer;
 		d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
@@ -1225,7 +1229,7 @@ ProgramHandle allocProgramHandle()
 	MT::CriticalSectionLock lock(d3d.handle_mutex);
 
 	if(d3d.programs.isFull()) {
-		logError("Renderer") << "FFR is out of free program slots.";
+		logError("Renderer") << "Not enough free program slots.";
 		return INVALID_PROGRAM;
 	}
 	const int id = d3d.programs.alloc();
@@ -1239,7 +1243,7 @@ BufferHandle allocBufferHandle()
 	MT::CriticalSectionLock lock(d3d.handle_mutex);
 
 	if(d3d.buffers.isFull()) {
-		logError("Renderer") << "FFR is out of free buffer slots.";
+		logError("Renderer") << "Not enough free buffer slots.";
 		return INVALID_BUFFER;
 	}
 	const int id = d3d.buffers.alloc();
@@ -1253,7 +1257,7 @@ TextureHandle allocTextureHandle()
 	MT::CriticalSectionLock lock(d3d.handle_mutex);
 
 	if(d3d.textures.isFull()) {
-		logError("Renderer") << "FFR is out of free texture slots.";
+		logError("Renderer") << "Not enough free texture slots.";
 		return INVALID_TEXTURE;
 	}
 	const int id = d3d.textures.alloc();
@@ -1646,7 +1650,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	ASSERT(texture.texture2D);
 
 	if(debug_name && debug_name[0]) {
-		texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, stringLength(debug_name), debug_name);
+		texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
 	}
 
 	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
@@ -1804,17 +1808,18 @@ void viewport(u32 x, u32 y, u32 w, u32 h)
 
 void useProgram(ProgramHandle handle)
 {
-    Program& program = d3d.programs[handle.value];
-    if (program.vs) {
-        d3d.device_ctx->VSSetShader(program.vs, nullptr, 0);
-    }
-    if (program.ps) {
-        d3d.device_ctx->PSSetShader(program.ps, nullptr, 0);
-    }
-    if (program.gs) {
-        d3d.device_ctx->GSSetShader(program.gs, nullptr, 0);
-    }
-	d3d.device_ctx->IASetInputLayout(program.il);
+	if(handle.isValid()) {
+		Program& program = d3d.programs[handle.value];
+		d3d.device_ctx->VSSetShader(program.vs, nullptr, 0);
+		d3d.device_ctx->PSSetShader(program.ps, nullptr, 0);
+		d3d.device_ctx->GSSetShader(program.gs, nullptr, 0);
+		d3d.device_ctx->IASetInputLayout(program.il);
+	}
+	else {
+		d3d.device_ctx->VSSetShader(nullptr, nullptr, 0);
+		d3d.device_ctx->PSSetShader(nullptr, nullptr, 0);
+		d3d.device_ctx->GSSetShader(nullptr, nullptr, 0);
+	}
 }
 
 void scissor(u32 x, u32 y, u32 w, u32 h) {
@@ -2278,9 +2283,9 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 	}
 
 	if (name && name[0]) {
-		if(program.vs) program.vs->SetPrivateData(WKPDID_D3DDebugObjectName, stringLength(name), name);
-		if(program.ps) program.ps->SetPrivateData(WKPDID_D3DDebugObjectName, stringLength(name), name);
-		if(program.gs) program.gs->SetPrivateData(WKPDID_D3DDebugObjectName, stringLength(name), name);
+		if(program.vs) program.vs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
+		if(program.ps) program.ps->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
+		if(program.gs) program.gs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
 	}
 
     return true;    

@@ -6,7 +6,7 @@ project "renderer"
 		"genie.lua"
 	}
 	excludes {
-		"../../src/renderer/ffr/ffr.cpp"
+		"../../src/renderer/gpu/gpu.cpp"
 	}
 
 if build_studio then
