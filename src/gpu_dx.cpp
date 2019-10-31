@@ -1431,7 +1431,31 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 		hr = d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 		ASSERT(SUCCEEDED(hr));
 	} else if (layers > 1) {
-		ASSERT(false);
+		D3D11_TEXTURE2D_DESC desc = {};
+
+		desc.Width = hdr.dwWidth;
+		desc.Height = hdr.dwHeight;
+		desc.ArraySize = layers;
+		desc.MipLevels = mip_count;
+		desc.CPUAccessFlags = 0;
+		desc.Format = is_srgb ? li->srgb_format : li->format;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		desc.MiscFlags = 0;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.SampleDesc.Count = 1;
+		texture.dxgi_format = desc.Format;
+		HRESULT hr = d3d.device->CreateTexture2D(&desc, srd, &texture.texture2D);
+		ASSERT(SUCCEEDED(hr));
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+		srv_desc.Format = toViewFormat(desc.Format);
+		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+		srv_desc.Texture2DArray.MipLevels = mip_count;
+		srv_desc.Texture2DArray.ArraySize = layers;
+		srv_desc.Texture2DArray.FirstArraySlice = 0;
+
+		hr = d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
+		ASSERT(SUCCEEDED(hr));
 	} else {
 		D3D11_TEXTURE2D_DESC desc = {};
 		desc.Width = hdr.dwWidth;
