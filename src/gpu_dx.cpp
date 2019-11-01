@@ -983,7 +983,7 @@ bool init(void* hwnd, u32 flags) {
     sampler_desc.MipLODBias = 0.f;
     sampler_desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
     sampler_desc.MinLOD = 0.f;
-    sampler_desc.MaxLOD = 0.f;
+    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
     d3d.device->CreateSamplerState(&sampler_desc, &d3d.default_sampler);
 
 	if(debug) {
@@ -1921,9 +1921,9 @@ void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t siz
 	ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
 	ASSERT(offset % 16 == 0);
 	const UINT first = (UINT)offset / 16;
-	const UINT num = ((UINT)size + 255) / 256;
-	d3d.device_ctx->VSSetConstantBuffers(index, 1, &b);
-	d3d.device_ctx->PSSetConstantBuffers(index, 1, &b);
+	const UINT num = ((UINT)size + 255) / 256 * 16;
+	d3d.device_ctx->VSSetConstantBuffers1(index, 1, &b, &first, &num);
+	d3d.device_ctx->PSSetConstantBuffers1(index, 1, &b, &first, &num);
 }
 
 void bindIndexBuffer(BufferHandle handle) {
