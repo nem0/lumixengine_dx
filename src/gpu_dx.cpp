@@ -15,6 +15,7 @@
 #include <cassert>
 #include <malloc.h>
 #include "renderer/gpu/renderdoc_app.h"
+#include "stb/stb_image_resize.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "glslang.lib")
@@ -44,14 +45,14 @@ namespace gpu {
 template <int N>
 static void toWChar(WCHAR (&out)[N], const char* in)
 {
-    const char* c = in;
-    WCHAR* cout = out;
-    while (*c && c - in < N - 1) {
-        *cout = *c;
-        ++cout;
-        ++c;
-    }
-    *cout = 0;
+	const char* c = in;
+	WCHAR* cout = out;
+	while (*c && c - in < N - 1) {
+		*cout = *c;
+		++cout;
+		++c;
+	}
+	*cout = 0;
 }
 
 static u32 getSize(DXGI_FORMAT format) {
@@ -140,14 +141,14 @@ struct Pool
 };
 
 struct Program {
-    ID3D11VertexShader* vs = nullptr;
-    ID3D11PixelShader* ps = nullptr;
-    ID3D11GeometryShader* gs = nullptr;
+	ID3D11VertexShader* vs = nullptr;
+	ID3D11PixelShader* ps = nullptr;
+	ID3D11GeometryShader* gs = nullptr;
 	ID3D11InputLayout* il = nullptr;
 };
 
 struct Buffer {
-    ID3D11Buffer* buffer;
+	ID3D11Buffer* buffer;
 	u8* mapped_ptr = nullptr;
 	bool is_constant_buffer = false;
 };
@@ -177,10 +178,10 @@ static struct {
 	DWORD thread;
 	RENDERDOC_API_1_0_2* rdoc_api;
 	IAllocator* allocator = nullptr;
-    IDXGISwapChain* swapchain = nullptr;
-    ID3D11DeviceContext1* device_ctx = nullptr;
-    ID3D11Device* device = nullptr;
-    ID3DUserDefinedAnnotation* annotation = nullptr;
+	IDXGISwapChain* swapchain = nullptr;
+	ID3D11DeviceContext1* device_ctx = nullptr;
+	ID3D11Device* device = nullptr;
+	ID3DUserDefinedAnnotation* annotation = nullptr;
 	ID3D11SamplerState* default_sampler = nullptr;
 	ID3D11Query* disjoint_query = nullptr;
 	bool disjoint_waiting = false;
@@ -189,11 +190,11 @@ static struct {
 
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	MT::CriticalSection handle_mutex;
-    Pool<Query, 2048> queries;
+	Pool<Query, 2048> queries;
 	Pool<Program, 256> programs;
-    Pool<Buffer, 8192> buffers;
-    Pool<Texture, 4096> textures;
-   	struct FrameBuffer {
+	Pool<Buffer, 8192> buffers;
+	Pool<Texture, 4096> textures;
+	struct FrameBuffer {
 		ID3D11DepthStencilView* depth_stencil = nullptr;
 		ID3D11RenderTargetView* render_targets[16];
 		u32 count = 0;
@@ -420,7 +421,7 @@ struct LoadInfo {
 };
 
 static u32 sizeDXTC(u32 w, u32 h, DXGI_FORMAT format) {
-    const bool is_dxt1 = format == DXGI_FORMAT_BC1_UNORM || format == DXGI_FORMAT_BC1_UNORM_SRGB;
+	const bool is_dxt1 = format == DXGI_FORMAT_BC1_UNORM || format == DXGI_FORMAT_BC1_UNORM_SRGB;
 	const bool is_ati = format == DXGI_FORMAT_BC4_UNORM;
 	return ((w + 3) / 4) * ((h + 3) / 4) * (is_dxt1 || is_ati ? 8 : 16);
 }
@@ -888,6 +889,10 @@ void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) 
 	view.dxgi_format = texture.dxgi_format;
 	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 	texture.srv->GetDesc(&srv_desc);
+	if (srv_desc.ViewDimension != D3D_SRV_DIMENSION_TEXTURE2D) {
+		srv_desc.ViewDimension = D3D_SRV_DIMENSION_TEXTURE2D;
+	}
+
 	d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &view.srv);
 }
 
@@ -977,99 +982,99 @@ bool init(void* hwnd, u32 flags) {
 	d3d.thread = GetCurrentThreadId();
 	ShInitialize();
 
-    RECT rect;
-    GetClientRect((HWND)hwnd, &rect);
+	RECT rect;
+	GetClientRect((HWND)hwnd, &rect);
 	d3d.size = IVec2(rect.right - rect.left, rect.bottom - rect.top);
 
-    int width = rect.right - rect.left;
-    int height = rect.bottom - rect.top;
+	int width = rect.right - rect.left;
+	int height = rect.bottom - rect.top;
 
-    HMODULE lib = LoadLibrary("d3d11.dll");
-    #define DECL_D3D_API(f) \
-        auto api_##f = (decltype(f)*)GetProcAddress(lib, #f);
-    
-    DECL_D3D_API(D3D11CreateDeviceAndSwapChain);
-    
-    DXGI_SWAP_CHAIN_DESC desc = {};
-    desc.BufferDesc.Width = 0;
-    desc.BufferDesc.Height = 0;
-    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.BufferDesc.RefreshRate.Numerator = 60;
-    desc.BufferDesc.RefreshRate.Denominator = 1;
-    desc.OutputWindow = (HWND)hwnd;
-    desc.Windowed = true;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    desc.BufferCount = 1;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
+	HMODULE lib = LoadLibrary("d3d11.dll");
+	#define DECL_D3D_API(f) \
+		auto api_##f = (decltype(f)*)GetProcAddress(lib, #f);
+	
+	DECL_D3D_API(D3D11CreateDeviceAndSwapChain);
+	
+	DXGI_SWAP_CHAIN_DESC desc = {};
+	desc.BufferDesc.Width = 0;
+	desc.BufferDesc.Height = 0;
+	desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	desc.BufferDesc.RefreshRate.Numerator = 60;
+	desc.BufferDesc.RefreshRate.Denominator = 1;
+	desc.OutputWindow = (HWND)hwnd;
+	desc.Windowed = true;
+	desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+	desc.BufferCount = 1;
+	desc.SampleDesc.Count = 1;
+	desc.SampleDesc.Quality = 0;
 	desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    const u32 create_flags = D3D11_CREATE_DEVICE_SINGLETHREADED | (debug ? D3D11_CREATE_DEVICE_DEBUG : 0);
-    D3D_FEATURE_LEVEL feature_level;
+	desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	const u32 create_flags = D3D11_CREATE_DEVICE_SINGLETHREADED | (debug ? D3D11_CREATE_DEVICE_DEBUG : 0);
+	D3D_FEATURE_LEVEL feature_level;
 	ID3D11DeviceContext* ctx;
 	HRESULT hr = api_D3D11CreateDeviceAndSwapChain(NULL
-        , D3D_DRIVER_TYPE_HARDWARE
-        , NULL
-        , create_flags
-        , NULL
-        , 0
-        , D3D11_SDK_VERSION
-        , &desc
-        , &d3d.swapchain
-        , &d3d.device
-        , &feature_level
-        , &ctx);
+		, D3D_DRIVER_TYPE_HARDWARE
+		, NULL
+		, create_flags
+		, NULL
+		, 0
+		, D3D11_SDK_VERSION
+		, &desc
+		, &d3d.swapchain
+		, &d3d.device
+		, &feature_level
+		, &ctx);
 
 	ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&d3d.device_ctx);
 
-    if(!SUCCEEDED(hr)) return false;
+	if(!SUCCEEDED(hr)) return false;
 
-    ID3D11Texture2D* rt;
-    hr = d3d.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
-    if(!SUCCEEDED(hr)) return false;
+	ID3D11Texture2D* rt;
+	hr = d3d.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
+	if(!SUCCEEDED(hr)) return false;
 
-    hr = d3d.device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &d3d.default_framebuffer.render_targets[0]);
+	hr = d3d.device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &d3d.default_framebuffer.render_targets[0]);
 	rt->Release();
 	if(!SUCCEEDED(hr)) return false;
-    d3d.default_framebuffer.count = 1;
-    
-    D3D11_TEXTURE2D_DESC ds_desc;
-    memset(&ds_desc, 0, sizeof(ds_desc));
-    ds_desc.Width = width;
-    ds_desc.Height = height;
-    ds_desc.MipLevels = 1;
-    ds_desc.ArraySize = 1;
-    ds_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    ds_desc.SampleDesc = desc.SampleDesc;
-    ds_desc.Usage = D3D11_USAGE_DEFAULT;
-    ds_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+	d3d.default_framebuffer.count = 1;
+	
+	D3D11_TEXTURE2D_DESC ds_desc;
+	memset(&ds_desc, 0, sizeof(ds_desc));
+	ds_desc.Width = width;
+	ds_desc.Height = height;
+	ds_desc.MipLevels = 1;
+	ds_desc.ArraySize = 1;
+	ds_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+	ds_desc.SampleDesc = desc.SampleDesc;
+	ds_desc.Usage = D3D11_USAGE_DEFAULT;
+	ds_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
 
-    ID3D11Texture2D* ds;
-    hr = d3d.device->CreateTexture2D(&ds_desc, NULL, &ds);
-    if(!SUCCEEDED(hr)) return false;
+	ID3D11Texture2D* ds;
+	hr = d3d.device->CreateTexture2D(&ds_desc, NULL, &ds);
+	if(!SUCCEEDED(hr)) return false;
 
-    D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc;
-    memset(&dsv_desc, 0, sizeof(dsv_desc));
-    dsv_desc.Format = ds_desc.Format;
-    dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+	D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc;
+	memset(&dsv_desc, 0, sizeof(dsv_desc));
+	dsv_desc.Format = ds_desc.Format;
+	dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
 
-    hr = d3d.device->CreateDepthStencilView((ID3D11Resource*)ds, &dsv_desc, &d3d.default_framebuffer.depth_stencil);
-    if(!SUCCEEDED(hr)) return false;
+	hr = d3d.device->CreateDepthStencilView((ID3D11Resource*)ds, &dsv_desc, &d3d.default_framebuffer.depth_stencil);
+	if(!SUCCEEDED(hr)) return false;
 
 	d3d.current_framebuffer = d3d.default_framebuffer;
 
-    d3d.device_ctx->QueryInterface(IID_ID3DUserDefinedAnnotation, (void**)&d3d.annotation);
+	d3d.device_ctx->QueryInterface(IID_ID3DUserDefinedAnnotation, (void**)&d3d.annotation);
 
 	D3D11_SAMPLER_DESC sampler_desc = {};
-    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
-    sampler_desc.MipLODBias = 0.f;
-    sampler_desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
-    sampler_desc.MinLOD = 0.f;
-    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-    d3d.device->CreateSamplerState(&sampler_desc, &d3d.default_sampler);
+	sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+	sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+	sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+	sampler_desc.MipLODBias = 0.f;
+	sampler_desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+	sampler_desc.MinLOD = 0.f;
+	sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+	d3d.device->CreateSamplerState(&sampler_desc, &d3d.default_sampler);
 
 	if(debug) {
 		ID3D11Debug* d3d_debug = nullptr;
@@ -1111,19 +1116,19 @@ bool init(void* hwnd, u32 flags) {
 	d3d.device_ctx->Begin(d3d.disjoint_query);
 	d3d.disjoint_waiting = false;
 
-    return true;
+	return true;
 }
 
 void pushDebugGroup(const char* msg)
 {
-    WCHAR tmp[128];
-    toWChar(tmp, msg);
-    d3d.annotation->BeginEvent(tmp);
+	WCHAR tmp[128];
+	toWChar(tmp, msg);
+	d3d.annotation->BeginEvent(tmp);
 }
 
 void popDebugGroup()
 {
-    d3d.annotation->EndEvent();
+	d3d.annotation->EndEvent();
 }
 
 // TODO texture might get destroyed while framebuffer has rtv or dsv to it
@@ -1164,7 +1169,7 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 				desc.Format = t.dxgi_format;
 				desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
 				desc.Texture2D.MipSlice = 0;
-			    d3d.device->CreateRenderTargetView((ID3D11Resource*)t.texture2D, &desc, &t.rtv);
+				d3d.device->CreateRenderTargetView((ID3D11Resource*)t.texture2D, &desc, &t.rtv);
 			}
 			ASSERT(d3d.current_framebuffer.count < (u32)lengthOf(d3d.current_framebuffer.render_targets));
 			d3d.current_framebuffer.render_targets[d3d.current_framebuffer.count] = t.rtv;
@@ -1176,33 +1181,33 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 	d3d.device_ctx->VSSetShaderResources(0, lengthOf(tmp), tmp);
 	d3d.device_ctx->PSSetShaderResources(0, lengthOf(tmp), tmp);
 
-    d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
+	d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
 }
 
 void clear(u32 flags, const float* color, float depth)
 {
-    if (flags & (u32)ClearFlags::COLOR) {
-        for (u32 i = 0; i < d3d.current_framebuffer.count; ++i) {
-            d3d.device_ctx->ClearRenderTargetView(d3d.current_framebuffer.render_targets[i], color);
-        }
-    }
-    u32 ds_flags = 0;
-    if (flags & (u32)ClearFlags::DEPTH) {
-        ds_flags |= D3D11_CLEAR_DEPTH;
-    }
-    if (flags & (u32)ClearFlags::STENCIL) {
-        ds_flags |= D3D11_CLEAR_STENCIL;
-    }
-    if (ds_flags && d3d.current_framebuffer.depth_stencil) {
-        d3d.device_ctx->ClearDepthStencilView(d3d.current_framebuffer.depth_stencil, ds_flags, depth, 0);
-    }
+	if (flags & (u32)ClearFlags::COLOR) {
+		for (u32 i = 0; i < d3d.current_framebuffer.count; ++i) {
+			d3d.device_ctx->ClearRenderTargetView(d3d.current_framebuffer.render_targets[i], color);
+		}
+	}
+	u32 ds_flags = 0;
+	if (flags & (u32)ClearFlags::DEPTH) {
+		ds_flags |= D3D11_CLEAR_DEPTH;
+	}
+	if (flags & (u32)ClearFlags::STENCIL) {
+		ds_flags |= D3D11_CLEAR_STENCIL;
+	}
+	if (ds_flags && d3d.current_framebuffer.depth_stencil) {
+		d3d.device_ctx->ClearDepthStencilView(d3d.current_framebuffer.depth_stencil, ds_flags, depth, 0);
+	}
 }
 
 void* map(BufferHandle handle, size_t size)
 {
-    Buffer& buffer = d3d.buffers[handle.value];
-    D3D11_MAP map = D3D11_MAP_WRITE_DISCARD;
-    ASSERT(!buffer.mapped_ptr);
+	Buffer& buffer = d3d.buffers[handle.value];
+	D3D11_MAP map = D3D11_MAP_WRITE_DISCARD;
+	ASSERT(!buffer.mapped_ptr);
 	D3D11_MAPPED_SUBRESOURCE msr;
 	d3d.device_ctx->Map(buffer.buffer, 0, map, 0, &msr);
 	buffer.mapped_ptr = (u8*)msr.pData;
@@ -1221,7 +1226,7 @@ Backend getBackend() { return Backend::DX11; }
 
 void swapBuffers(u32 w, u32 h)
 {
-    d3d.swapchain->Present(1, 0);
+	d3d.swapchain->Present(1, 0);
 	if(d3d.disjoint_waiting) {
 		D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint_query_data;
 		const HRESULT res = d3d.device_ctx->GetData(d3d.disjoint_query, &disjoint_query_data, sizeof(disjoint_query_data), 0);
@@ -1286,11 +1291,11 @@ void swapBuffers(u32 w, u32 h)
 
 void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 {
-    Buffer& buffer= d3d.buffers[handle.value];
-    D3D11_BUFFER_DESC desc = {};
-    desc.ByteWidth = (UINT)size;
+	Buffer& buffer= d3d.buffers[handle.value];
+	D3D11_BUFFER_DESC desc = {};
+	desc.ByteWidth = (UINT)size;
 	buffer.is_constant_buffer = flags & (u32)BufferFlags::UNIFORM_BUFFER;
-    if(flags & (u32)BufferFlags::UNIFORM_BUFFER) {
+	if(flags & (u32)BufferFlags::UNIFORM_BUFFER) {
 		desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; 
 	}
 	else {
@@ -1306,7 +1311,7 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	}
 	D3D11_SUBRESOURCE_DATA initial_data = {};
 	initial_data.pSysMem = data;
-    d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer.buffer);
+	d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer.buffer);
 }
 
 ProgramHandle allocProgramHandle()
@@ -1660,6 +1665,10 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	return true;
 }
 
+static void fillMip(const u8* src, u32 w, u32 h, u8* out) {
+	stbir_resize_uint8(src, w, h, 0, out, maximum(1, w >> 1), maximum(1, h >> 1), 0, 4);
+}
+
 bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, u32 flags, const void* data, const char* debug_name)
 {
 	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
@@ -1700,14 +1709,19 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		for(u32 layer = 0; layer < depth; ++layer) {
 			srd[0].pSysMem = ptr;
 			srd[0].SysMemPitch = w * bytes_per_pixel;
+			u32 prev_mip_w = w;
+			u32 prev_mip_h = h;
+			const u8* prev_mip_data = ptr;
 			ptr += w * h * bytes_per_pixel;
 			for (u32 mip = 1; mip < mip_count; ++mip) {
-				// TODO generate mips
-				// d3d.device_ctx->GenerateMips()
 				Array<u8>& mip_data = mips_data.emplace(*d3d.allocator);
 				const u32 mip_w = maximum(w >> mip, 1);
 				const u32 mip_h = maximum(h >> mip, 1);
 				mip_data.resize(bytes_per_pixel * mip_w * mip_h);
+				fillMip(prev_mip_data, prev_mip_w, prev_mip_h, mip_data.begin());
+				prev_mip_w = mip_w;
+				prev_mip_h = mip_h;
+				prev_mip_data = mip_data.begin();
 				const u32 idx = mip + layer * mip_count;
 				srd[idx].pSysMem = mip_data.begin();
 				srd[idx].SysMemPitch = mip_w * bytes_per_pixel;
@@ -1738,35 +1752,35 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 void setState(u64 state)
 {
 	D3D11_BLEND_DESC blend_desc = {};
-    D3D11_RASTERIZER_DESC desc = {};
-    D3D11_DEPTH_STENCIL_DESC depthStencilDesc = {};
-    
+	D3D11_RASTERIZER_DESC desc = {};
+	D3D11_DEPTH_STENCIL_DESC depthStencilDesc = {};
+	
 	if (state & u64(StateFlags::CULL_BACK)) {
-        desc.CullMode = D3D11_CULL_BACK;
+		desc.CullMode = D3D11_CULL_BACK;
 	}
 	else if(state & u64(StateFlags::CULL_FRONT)) {
-        desc.CullMode = D3D11_CULL_FRONT;
+		desc.CullMode = D3D11_CULL_FRONT;
 	}
 	else {
-        desc.CullMode = D3D11_CULL_NONE;
+		desc.CullMode = D3D11_CULL_NONE;
 	}
 
-    desc.FrontCounterClockwise = TRUE;
-    desc.FillMode =  (state & u64(StateFlags::WIREFRAME)) != 0 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
-    desc.ScissorEnable = (state & u64(StateFlags::SCISSOR_TEST)) != 0;
-    desc.DepthClipEnable = FALSE;
+	desc.FrontCounterClockwise = TRUE;
+	desc.FillMode =  (state & u64(StateFlags::WIREFRAME)) != 0 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
+	desc.ScissorEnable = (state & u64(StateFlags::SCISSOR_TEST)) != 0;
+	desc.DepthClipEnable = FALSE;
 
-    depthStencilDesc.DepthEnable = (state & u64(StateFlags::DEPTH_TEST)) != 0;
-    depthStencilDesc.DepthWriteMask = (state & u64(StateFlags::DEPTH_WRITE)) != 0 ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-    depthStencilDesc.DepthFunc = (state & u64(StateFlags::DEPTH_TEST)) != 0 ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_ALWAYS;
+	depthStencilDesc.DepthEnable = (state & u64(StateFlags::DEPTH_TEST)) != 0;
+	depthStencilDesc.DepthWriteMask = (state & u64(StateFlags::DEPTH_WRITE)) != 0 ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+	depthStencilDesc.DepthFunc = (state & u64(StateFlags::DEPTH_TEST)) != 0 ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_ALWAYS;
 
 	const StencilFuncs func = (StencilFuncs)((state >> 30) & 0xf);
-    depthStencilDesc.StencilEnable = func != StencilFuncs::DISABLE; 
+	depthStencilDesc.StencilEnable = func != StencilFuncs::DISABLE; 
 	u8 stencil_ref = 0;
 	if(depthStencilDesc.StencilEnable) {
 
-	    depthStencilDesc.StencilReadMask = u8(state >> 42);
-	    depthStencilDesc.StencilWriteMask = u8(state >> 42);
+		depthStencilDesc.StencilReadMask = u8(state >> 42);
+		depthStencilDesc.StencilWriteMask = u8(state >> 42);
 		stencil_ref = u8(state >> 34);
 		D3D11_COMPARISON_FUNC dx_func;
 		switch(func) {
@@ -1851,14 +1865,14 @@ void setState(u64 state)
 	}
 
 
-    // TODO cache states
-    ID3D11DepthStencilState* dss;
-    d3d.device->CreateDepthStencilState(&depthStencilDesc, &dss);
-    d3d.device_ctx->OMSetDepthStencilState(dss, stencil_ref);
+	// TODO cache states
+	ID3D11DepthStencilState* dss;
+	d3d.device->CreateDepthStencilState(&depthStencilDesc, &dss);
+	d3d.device_ctx->OMSetDepthStencilState(dss, stencil_ref);
 
-    ID3D11RasterizerState* rs;
-    d3d.device->CreateRasterizerState(&desc, &rs);
-    d3d.device_ctx->RSSetState(rs);
+	ID3D11RasterizerState* rs;
+	d3d.device->CreateRasterizerState(&desc, &rs);
+	d3d.device_ctx->RSSetState(rs);
 
 	ID3D11BlendState* bs;
 	d3d.device->CreateBlendState(&blend_desc, &bs);
@@ -1868,15 +1882,15 @@ void setState(u64 state)
 
 void viewport(u32 x, u32 y, u32 w, u32 h)
 {
-    D3D11_VIEWPORT vp;
-    memset(&vp, 0, sizeof(D3D11_VIEWPORT));
-    vp.Width =  (float)w;
-    vp.Height = (float)h;
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    vp.TopLeftX = (float)x;
-    vp.TopLeftY = (float)y;
-    d3d.device_ctx->RSSetViewports(1, &vp);
+	D3D11_VIEWPORT vp;
+	memset(&vp, 0, sizeof(D3D11_VIEWPORT));
+	vp.Width =  (float)w;
+	vp.Height = (float)h;
+	vp.MinDepth = 0.0f;
+	vp.MaxDepth = 1.0f;
+	vp.TopLeftX = (float)x;
+	vp.TopLeftY = (float)y;
+	d3d.device_ctx->RSSetViewports(1, &vp);
 }
 
 void useProgram(ProgramHandle handle)
@@ -1914,21 +1928,21 @@ void drawTriangles(u32 indices_count, DataType index_type) {
 	ID3D11Buffer* b = d3d.buffers[d3d.current_index_buffer.value].buffer;
 	d3d.device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
 	d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    d3d.device_ctx->DrawIndexed(indices_count, 0, 0);
+	d3d.device_ctx->DrawIndexed(indices_count, 0, 0);
 }
 
 void drawArrays(u32 offset, u32 count, PrimitiveType type)
 {
-    D3D11_PRIMITIVE_TOPOLOGY topology;
-    switch(type) {
-        case PrimitiveType::LINES: topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
-        case PrimitiveType::POINTS: topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
-        case PrimitiveType::TRIANGLES: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
-        case PrimitiveType::TRIANGLE_STRIP: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
-        default: ASSERT(false); return;
-    }
-    d3d.device_ctx->IASetPrimitiveTopology(topology);
-    d3d.device_ctx->Draw(count, offset);
+	D3D11_PRIMITIVE_TOPOLOGY topology;
+	switch(type) {
+		case PrimitiveType::LINES: topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
+		case PrimitiveType::POINTS: topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
+		case PrimitiveType::TRIANGLES: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
+		case PrimitiveType::TRIANGLE_STRIP: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
+		default: ASSERT(false); return;
+	}
+	d3d.device_ctx->IASetPrimitiveTopology(topology);
+	d3d.device_ctx->Draw(count, offset);
 }
 
 bool isHomogenousDepth() { return false; }
@@ -2080,110 +2094,110 @@ static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
 }
 
 static const TBuiltInResource DefaultTBuiltInResource = {
-    /* .MaxLights = */ 32,
-    /* .MaxClipPlanes = */ 6,
-    /* .MaxTextureUnits = */ 32,
-    /* .MaxTextureCoords = */ 32,
-    /* .MaxVertexAttribs = */ 64,
-    /* .MaxVertexUniformComponents = */ 4096,
-    /* .MaxVaryingFloats = */ 64,
-    /* .MaxVertexTextureImageUnits = */ 32,
-    /* .MaxCombinedTextureImageUnits = */ 80,
-    /* .MaxTextureImageUnits = */ 32,
-    /* .MaxFragmentUniformComponents = */ 4096,
-    /* .MaxDrawBuffers = */ 32,
-    /* .MaxVertexUniformVectors = */ 128,
-    /* .MaxVaryingVectors = */ 8,
-    /* .MaxFragmentUniformVectors = */ 16,
-    /* .MaxVertexOutputVectors = */ 16,
-    /* .MaxFragmentInputVectors = */ 15,
-    /* .MinProgramTexelOffset = */ -8,
-    /* .MaxProgramTexelOffset = */ 7,
-    /* .MaxClipDistances = */ 8,
-    /* .MaxComputeWorkGroupCountX = */ 65535,
-    /* .MaxComputeWorkGroupCountY = */ 65535,
-    /* .MaxComputeWorkGroupCountZ = */ 65535,
-    /* .MaxComputeWorkGroupSizeX = */ 1024,
-    /* .MaxComputeWorkGroupSizeY = */ 1024,
-    /* .MaxComputeWorkGroupSizeZ = */ 64,
-    /* .MaxComputeUniformComponents = */ 1024,
-    /* .MaxComputeTextureImageUnits = */ 16,
-    /* .MaxComputeImageUniforms = */ 8,
-    /* .MaxComputeAtomicCounters = */ 8,
-    /* .MaxComputeAtomicCounterBuffers = */ 1,
-    /* .MaxVaryingComponents = */ 60,
-    /* .MaxVertexOutputComponents = */ 64,
-    /* .MaxGeometryInputComponents = */ 64,
-    /* .MaxGeometryOutputComponents = */ 128,
-    /* .MaxFragmentInputComponents = */ 128,
-    /* .MaxImageUnits = */ 8,
-    /* .MaxCombinedImageUnitsAndFragmentOutputs = */ 8,
-    /* .MaxCombinedShaderOutputResources = */ 8,
-    /* .MaxImageSamples = */ 0,
-    /* .MaxVertexImageUniforms = */ 0,
-    /* .MaxTessControlImageUniforms = */ 0,
-    /* .MaxTessEvaluationImageUniforms = */ 0,
-    /* .MaxGeometryImageUniforms = */ 0,
-    /* .MaxFragmentImageUniforms = */ 8,
-    /* .MaxCombinedImageUniforms = */ 8,
-    /* .MaxGeometryTextureImageUnits = */ 16,
-    /* .MaxGeometryOutputVertices = */ 256,
-    /* .MaxGeometryTotalOutputComponents = */ 1024,
-    /* .MaxGeometryUniformComponents = */ 1024,
-    /* .MaxGeometryVaryingComponents = */ 64,
-    /* .MaxTessControlInputComponents = */ 128,
-    /* .MaxTessControlOutputComponents = */ 128,
-    /* .MaxTessControlTextureImageUnits = */ 16,
-    /* .MaxTessControlUniformComponents = */ 1024,
-    /* .MaxTessControlTotalOutputComponents = */ 4096,
-    /* .MaxTessEvaluationInputComponents = */ 128,
-    /* .MaxTessEvaluationOutputComponents = */ 128,
-    /* .MaxTessEvaluationTextureImageUnits = */ 16,
-    /* .MaxTessEvaluationUniformComponents = */ 1024,
-    /* .MaxTessPatchComponents = */ 120,
-    /* .MaxPatchVertices = */ 32,
-    /* .MaxTessGenLevel = */ 64,
-    /* .MaxViewports = */ 16,
-    /* .MaxVertexAtomicCounters = */ 0,
-    /* .MaxTessControlAtomicCounters = */ 0,
-    /* .MaxTessEvaluationAtomicCounters = */ 0,
-    /* .MaxGeometryAtomicCounters = */ 0,
-    /* .MaxFragmentAtomicCounters = */ 8,
-    /* .MaxCombinedAtomicCounters = */ 8,
-    /* .MaxAtomicCounterBindings = */ 1,
-    /* .MaxVertexAtomicCounterBuffers = */ 0,
-    /* .MaxTessControlAtomicCounterBuffers = */ 0,
-    /* .MaxTessEvaluationAtomicCounterBuffers = */ 0,
-    /* .MaxGeometryAtomicCounterBuffers = */ 0,
-    /* .MaxFragmentAtomicCounterBuffers = */ 1,
-    /* .MaxCombinedAtomicCounterBuffers = */ 1,
-    /* .MaxAtomicCounterBufferSize = */ 16384,
-    /* .MaxTransformFeedbackBuffers = */ 4,
-    /* .MaxTransformFeedbackInterleavedComponents = */ 64,
-    /* .MaxCullDistances = */ 8,
-    /* .MaxCombinedClipAndCullDistances = */ 8,
-    /* .MaxSamples = */ 4,
-    /* .maxMeshOutputVerticesNV = */ 256,
-    /* .maxMeshOutputPrimitivesNV = */ 512,
-    /* .maxMeshWorkGroupSizeX_NV = */ 32,
-    /* .maxMeshWorkGroupSizeY_NV = */ 1,
-    /* .maxMeshWorkGroupSizeZ_NV = */ 1,
-    /* .maxTaskWorkGroupSizeX_NV = */ 32,
-    /* .maxTaskWorkGroupSizeY_NV = */ 1,
-    /* .maxTaskWorkGroupSizeZ_NV = */ 1,
-    /* .maxMeshViewCountNV = */ 4,
+	/* .MaxLights = */ 32,
+	/* .MaxClipPlanes = */ 6,
+	/* .MaxTextureUnits = */ 32,
+	/* .MaxTextureCoords = */ 32,
+	/* .MaxVertexAttribs = */ 64,
+	/* .MaxVertexUniformComponents = */ 4096,
+	/* .MaxVaryingFloats = */ 64,
+	/* .MaxVertexTextureImageUnits = */ 32,
+	/* .MaxCombinedTextureImageUnits = */ 80,
+	/* .MaxTextureImageUnits = */ 32,
+	/* .MaxFragmentUniformComponents = */ 4096,
+	/* .MaxDrawBuffers = */ 32,
+	/* .MaxVertexUniformVectors = */ 128,
+	/* .MaxVaryingVectors = */ 8,
+	/* .MaxFragmentUniformVectors = */ 16,
+	/* .MaxVertexOutputVectors = */ 16,
+	/* .MaxFragmentInputVectors = */ 15,
+	/* .MinProgramTexelOffset = */ -8,
+	/* .MaxProgramTexelOffset = */ 7,
+	/* .MaxClipDistances = */ 8,
+	/* .MaxComputeWorkGroupCountX = */ 65535,
+	/* .MaxComputeWorkGroupCountY = */ 65535,
+	/* .MaxComputeWorkGroupCountZ = */ 65535,
+	/* .MaxComputeWorkGroupSizeX = */ 1024,
+	/* .MaxComputeWorkGroupSizeY = */ 1024,
+	/* .MaxComputeWorkGroupSizeZ = */ 64,
+	/* .MaxComputeUniformComponents = */ 1024,
+	/* .MaxComputeTextureImageUnits = */ 16,
+	/* .MaxComputeImageUniforms = */ 8,
+	/* .MaxComputeAtomicCounters = */ 8,
+	/* .MaxComputeAtomicCounterBuffers = */ 1,
+	/* .MaxVaryingComponents = */ 60,
+	/* .MaxVertexOutputComponents = */ 64,
+	/* .MaxGeometryInputComponents = */ 64,
+	/* .MaxGeometryOutputComponents = */ 128,
+	/* .MaxFragmentInputComponents = */ 128,
+	/* .MaxImageUnits = */ 8,
+	/* .MaxCombinedImageUnitsAndFragmentOutputs = */ 8,
+	/* .MaxCombinedShaderOutputResources = */ 8,
+	/* .MaxImageSamples = */ 0,
+	/* .MaxVertexImageUniforms = */ 0,
+	/* .MaxTessControlImageUniforms = */ 0,
+	/* .MaxTessEvaluationImageUniforms = */ 0,
+	/* .MaxGeometryImageUniforms = */ 0,
+	/* .MaxFragmentImageUniforms = */ 8,
+	/* .MaxCombinedImageUniforms = */ 8,
+	/* .MaxGeometryTextureImageUnits = */ 16,
+	/* .MaxGeometryOutputVertices = */ 256,
+	/* .MaxGeometryTotalOutputComponents = */ 1024,
+	/* .MaxGeometryUniformComponents = */ 1024,
+	/* .MaxGeometryVaryingComponents = */ 64,
+	/* .MaxTessControlInputComponents = */ 128,
+	/* .MaxTessControlOutputComponents = */ 128,
+	/* .MaxTessControlTextureImageUnits = */ 16,
+	/* .MaxTessControlUniformComponents = */ 1024,
+	/* .MaxTessControlTotalOutputComponents = */ 4096,
+	/* .MaxTessEvaluationInputComponents = */ 128,
+	/* .MaxTessEvaluationOutputComponents = */ 128,
+	/* .MaxTessEvaluationTextureImageUnits = */ 16,
+	/* .MaxTessEvaluationUniformComponents = */ 1024,
+	/* .MaxTessPatchComponents = */ 120,
+	/* .MaxPatchVertices = */ 32,
+	/* .MaxTessGenLevel = */ 64,
+	/* .MaxViewports = */ 16,
+	/* .MaxVertexAtomicCounters = */ 0,
+	/* .MaxTessControlAtomicCounters = */ 0,
+	/* .MaxTessEvaluationAtomicCounters = */ 0,
+	/* .MaxGeometryAtomicCounters = */ 0,
+	/* .MaxFragmentAtomicCounters = */ 8,
+	/* .MaxCombinedAtomicCounters = */ 8,
+	/* .MaxAtomicCounterBindings = */ 1,
+	/* .MaxVertexAtomicCounterBuffers = */ 0,
+	/* .MaxTessControlAtomicCounterBuffers = */ 0,
+	/* .MaxTessEvaluationAtomicCounterBuffers = */ 0,
+	/* .MaxGeometryAtomicCounterBuffers = */ 0,
+	/* .MaxFragmentAtomicCounterBuffers = */ 1,
+	/* .MaxCombinedAtomicCounterBuffers = */ 1,
+	/* .MaxAtomicCounterBufferSize = */ 16384,
+	/* .MaxTransformFeedbackBuffers = */ 4,
+	/* .MaxTransformFeedbackInterleavedComponents = */ 64,
+	/* .MaxCullDistances = */ 8,
+	/* .MaxCombinedClipAndCullDistances = */ 8,
+	/* .MaxSamples = */ 4,
+	/* .maxMeshOutputVerticesNV = */ 256,
+	/* .maxMeshOutputPrimitivesNV = */ 512,
+	/* .maxMeshWorkGroupSizeX_NV = */ 32,
+	/* .maxMeshWorkGroupSizeY_NV = */ 1,
+	/* .maxMeshWorkGroupSizeZ_NV = */ 1,
+	/* .maxTaskWorkGroupSizeX_NV = */ 32,
+	/* .maxTaskWorkGroupSizeY_NV = */ 1,
+	/* .maxTaskWorkGroupSizeZ_NV = */ 1,
+	/* .maxMeshViewCountNV = */ 4,
 
-    /* .limits = */ {
-        /* .nonInductiveForLoops = */ 1,
-        /* .whileLoops = */ 1,
-        /* .doWhileLoops = */ 1,
-        /* .generalUniformIndexing = */ 1,
-        /* .generalAttributeMatrixVectorIndexing = */ 1,
-        /* .generalVaryingIndexing = */ 1,
-        /* .generalSamplerIndexing = */ 1,
-        /* .generalVariableIndexing = */ 1,
-        /* .generalConstantMatrixVectorIndexing = */ 1,
-    }
+	/* .limits = */ {
+		/* .nonInductiveForLoops = */ 1,
+		/* .whileLoops = */ 1,
+		/* .doWhileLoops = */ 1,
+		/* .generalUniformIndexing = */ 1,
+		/* .generalAttributeMatrixVectorIndexing = */ 1,
+		/* .generalVaryingIndexing = */ 1,
+		/* .generalSamplerIndexing = */ 1,
+		/* .generalVariableIndexing = */ 1,
+		/* .generalConstantMatrixVectorIndexing = */ 1,
+	}
 };
 
 static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out) {
@@ -2232,11 +2246,11 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 
 bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name)
 {
-    Program& program = d3d.programs[handle.value];
+	Program& program = d3d.programs[handle.value];
 	program = {};
 	void* vs_bytecode = nullptr;
 	size_t vs_bytecode_len = 0;
-    
+	
 	static const char* attr_defines[] = {
 		"#define _HAS_ATTR0\n",
 		"#define _HAS_ATTR1\n",
@@ -2272,52 +2286,52 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 	};
 	
 	auto compile = [&](const char* src, ShaderType type){
-        // TODO cleanup
+		// TODO cleanup
 		ID3DBlob* output = NULL;
-        ID3DBlob* errors = NULL;
+		ID3DBlob* errors = NULL;
 
 		D3DCompile(src
-            , strlen(src) + 1
-            , name
-            , NULL
-            , NULL
-            , "main"
-            , type == ShaderType::VERTEX ? "vs_5_0" : "ps_5_0"
-            , D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_DEBUG
-            , 0
-            , &output
-            , &errors);
-        if (errors) {
-            auto e = (LPCSTR)errors->GetBufferPointer();
-            OutputDebugString(e);
-            errors->Release(); // TODO
-            if (!output) {
-				ASSERT(false);
+			, strlen(src) + 1
+			, name
+			, NULL
+			, NULL
+			, "main"
+			, type == ShaderType::VERTEX ? "vs_5_0" : "ps_5_0"
+			, D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_DEBUG
+			, 0
+			, &output
+			, &errors);
+		if (errors) {
+			auto e = (LPCSTR)errors->GetBufferPointer();
+			OutputDebugString(e);
+			errors->Release(); // TODO
+			if (!output) {
 				return false;
 			}
-        }
+		}
+		ASSERT(output);
 
-        void* ptr = output->GetBufferPointer();
-        size_t len = output->GetBufferSize();
+		void* ptr = output->GetBufferPointer();
+		size_t len = output->GetBufferSize();
 
-        switch(type) {
-            case ShaderType::VERTEX:
-                // TODO errors
+		switch(type) {
+			case ShaderType::VERTEX:
+				// TODO errors
 				vs_bytecode = ptr;
 				vs_bytecode_len = len;
-                d3d.device->CreateVertexShader(ptr, len, nullptr, &program.vs);
-                break;
-            case ShaderType::FRAGMENT:
-                d3d.device->CreatePixelShader(ptr, len, nullptr, &program.ps);
-                break;
-            case ShaderType::GEOMETRY:
-                d3d.device->CreateGeometryShader(ptr, len, nullptr, &program.gs);
-                break;
-            default:
-                ASSERT(false);
-        }
+				d3d.device->CreateVertexShader(ptr, len, nullptr, &program.vs);
+				break;
+			case ShaderType::FRAGMENT:
+				d3d.device->CreatePixelShader(ptr, len, nullptr, &program.ps);
+				break;
+			case ShaderType::GEOMETRY:
+				d3d.device->CreateGeometryShader(ptr, len, nullptr, &program.gs);
+				break;
+			default:
+				ASSERT(false);
+		}
 		return true;
-    };
+	};
 
 	auto compile_stage = [&](ShaderType type){
 		const u32 c = filter_srcs(type);
@@ -2361,7 +2375,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 		if(program.gs) program.gs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
 	}
 
-    return true;    
+	return true;    
 }
 
 } // ns gpu
