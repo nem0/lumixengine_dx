@@ -54,6 +54,51 @@ static void toWChar(WCHAR (&out)[N], const char* in)
     *cout = 0;
 }
 
+static u32 getSize(DXGI_FORMAT format) {
+	switch(format) {
+		case DXGI_FORMAT_R8_UNORM: return 1;
+		case DXGI_FORMAT_R32_TYPELESS: return 4;
+		case DXGI_FORMAT_R24G8_TYPELESS: return 4;
+		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 4;
+		case DXGI_FORMAT_R8G8B8A8_UNORM: return 4;
+		case DXGI_FORMAT_R16G16B16A16_UNORM: return 8;
+		case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
+		case DXGI_FORMAT_R16_UNORM: return 2;
+		case DXGI_FORMAT_R16_FLOAT: return 2;
+		case DXGI_FORMAT_R32_FLOAT: return 4;
+	}
+	ASSERT(false);
+	return 0;
+}
+
+int getSize(AttributeType type) {
+	switch(type) {
+		case AttributeType::FLOAT: return 4;
+		case AttributeType::U8: return 1;
+		case AttributeType::I16: return 2;
+		default: ASSERT(false); return 0;
+	}
+}
+
+static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
+	switch (format) {
+		case TextureFormat::R8: return DXGI_FORMAT_R8_UNORM;
+		case TextureFormat::D32: return DXGI_FORMAT_R32_TYPELESS;
+		case TextureFormat::D24: return DXGI_FORMAT_R32_TYPELESS;
+		case TextureFormat::D24S8: return DXGI_FORMAT_R24G8_TYPELESS;
+		//case TextureFormat::SRGB: return DXGI_FORMAT_R32_FLOAT;
+		case TextureFormat::SRGBA: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		case TextureFormat::RGBA8: return DXGI_FORMAT_R8G8B8A8_UNORM;
+		case TextureFormat::RGBA16: return DXGI_FORMAT_R16G16B16A16_UNORM;
+		case TextureFormat::RGBA16F: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+		case TextureFormat::R16: return DXGI_FORMAT_R16_UNORM;
+		case TextureFormat::R16F: return DXGI_FORMAT_R16_FLOAT;
+		case TextureFormat::R32F: return DXGI_FORMAT_R32_FLOAT;
+	}
+	ASSERT(false);
+	return DXGI_FORMAT_R8G8B8A8_UINT;
+}
+
 template <typename T, int MAX_COUNT>
 struct Pool
 {
@@ -118,7 +163,6 @@ struct Texture {
 	};
 	ID3D11ShaderResourceView* srv;
 	DXGI_FORMAT dxgi_format;
-	u32 flags = 0;
 };
 
 struct Query {
@@ -149,7 +193,6 @@ static struct {
 	Pool<Program, 256> programs;
     Pool<Buffer, 8192> buffers;
     Pool<Texture, 4096> textures;
-	Pool<InputLayout, 8192> input_layouts;
    	struct FrameBuffer {
 		ID3D11DepthStencilView* depth_stencil = nullptr;
 		ID3D11RenderTargetView* render_targets[16];
@@ -820,7 +863,7 @@ void destroy(TextureHandle texture) {
 		if (t.rtv) t.rtv->Release();
 	}
 
-	t.texture2D->Release();
+	if (t.texture2D) t.texture2D->Release();
 
 	MT::CriticalSectionLock lock(d3d.handle_mutex);
 	d3d.textures.dealloc(texture.value);
@@ -839,11 +882,49 @@ void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
 	d3d.device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
+void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) {
+	Texture& texture = d3d.textures[texture_handle.value];
+	Texture& view = d3d.textures[view_handle.value];
+	view.dxgi_format = texture.dxgi_format;
+	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+	texture.srv->GetDesc(&srv_desc);
+	d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &view.srv);
+}
 
-// TODO
-void createTextureView(TextureHandle view, TextureHandle texture) {}
-void update(TextureHandle texture, u32 level, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {}
-void getTextureImage(TextureHandle texture, u32 size, void* buf) {}
+void update(TextureHandle texture_handle, u32 mip, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {
+	Texture& texture = d3d.textures[texture_handle.value];
+	ASSERT(texture.dxgi_format == getDXGIFormat(format));
+	const UINT subres = mip;
+	const u32 bytes_per_pixel = getSize(texture.dxgi_format);
+	const UINT row_pitch = w * bytes_per_pixel;
+	const UINT depth_pitch = row_pitch * h;
+	D3D11_BOX box;
+	box.left = x;
+	box.top = y;
+	box.right = x + w;
+	box.bottom = y + h;
+	box.front = 0;
+	box.back = 1;
+	
+	d3d.device_ctx->UpdateSubresource(texture.texture2D, subres, &box, buf, row_pitch, depth_pitch);
+}
+
+void copy(TextureHandle dst_handle, TextureHandle src_handle) {
+	Texture& dst = d3d.textures[dst_handle.value];
+	Texture& src = d3d.textures[src_handle.value];
+	d3d.device_ctx->CopyResource(dst.texture2D, src.texture2D);
+}
+
+void readTexture(TextureHandle handle, u32 size, void* buf) {
+	Texture& texture = d3d.textures[handle.value];
+	ASSERT(texture.dxgi_format == DXGI_FORMAT_R8G8B8A8_UNORM);
+
+	D3D11_MAPPED_SUBRESOURCE data;
+	d3d.device_ctx->Map(texture.texture2D, 0, D3D11_MAP_READ, 0, &data);
+	ASSERT(data.DepthPitch == size);
+	memcpy(buf, data.pData, size);
+	d3d.device_ctx->Unmap(texture.texture2D, 0);
+}
 
 void queryTimestamp(QueryHandle query) {
 	checkThread();
@@ -881,6 +962,10 @@ void preinit(IAllocator& allocator)
 void shutdown() {
 	ShFinalize();
 	// TODO
+	d3d.textures.destroy(*d3d.allocator);
+	d3d.buffers.destroy(*d3d.allocator);
+	d3d.programs.destroy(*d3d.allocator);
+	d3d.queries.destroy(*d3d.allocator);
 }
 
 bool init(void* hwnd, u32 flags) {
@@ -1266,16 +1351,6 @@ TextureHandle allocTextureHandle()
 	return { (u32)id };
 }
 
-
-int getSize(AttributeType type) {
-	switch(type) {
-		case AttributeType::FLOAT: return 4;
-		case AttributeType::U8: return 1;
-		case AttributeType::I16: return 2;
-		default: ASSERT(false); return 0;
-	}
-}
-
 void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, AttributeType type, u8 flags) {
 	if((int)attributes_count >= lengthOf(attributes)) {
 		ASSERT(false);
@@ -1290,25 +1365,6 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 	attr.byte_offset = byte_offset;
 	hash = crc32(attributes, sizeof(Attribute) * attributes_count);
 	++attributes_count;
-}
-
-static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
-	switch (format) {
-		case TextureFormat::R8: return DXGI_FORMAT_R8_UNORM;
-		case TextureFormat::D32: return DXGI_FORMAT_R32_TYPELESS;
-		case TextureFormat::D24: return DXGI_FORMAT_R32_TYPELESS;
-		case TextureFormat::D24S8: return DXGI_FORMAT_R24G8_TYPELESS;
-		//case TextureFormat::SRGB: return DXGI_FORMAT_R32_FLOAT;
-		case TextureFormat::SRGBA: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-		case TextureFormat::RGBA8: return DXGI_FORMAT_R8G8B8A8_UNORM;
-		case TextureFormat::RGBA16: return DXGI_FORMAT_R16G16B16A16_UNORM;
-		case TextureFormat::RGBA16F: return DXGI_FORMAT_R16G16B16A16_FLOAT;
-		case TextureFormat::R16: return DXGI_FORMAT_R16_UNORM;
-		case TextureFormat::R16F: return DXGI_FORMAT_R16_FLOAT;
-		case TextureFormat::R32F: return DXGI_FORMAT_R32_FLOAT;
-	}
-	ASSERT(false);
-	return DXGI_FORMAT_R8G8B8A8_UINT;
 }
 
 bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, const char* debug_name) { 
@@ -1400,6 +1456,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 				}
 			}
 			else {
+				// TODO
 				ASSERT(false);
 			}
 		}
@@ -1426,7 +1483,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 		srv_desc.Format = toViewFormat(desc.Format);
 		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-		srv_desc.Texture3D.MipLevels = mip_count;
+		srv_desc.TextureCube.MipLevels = mip_count;
 
 		hr = d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 		ASSERT(SUCCEEDED(hr));
@@ -1603,27 +1660,11 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	return true;
 }
 
-static u32 getSize(DXGI_FORMAT format) {
-	switch(format) {
-		case DXGI_FORMAT_R8_UNORM: return 1;
-		case DXGI_FORMAT_R32_TYPELESS: return 4;
-		case DXGI_FORMAT_R24G8_TYPELESS: return 4;
-		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 4;
-		case DXGI_FORMAT_R8G8B8A8_UNORM: return 4;
-		case DXGI_FORMAT_R16G16B16A16_UNORM: return 8;
-		case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
-		case DXGI_FORMAT_R16_UNORM: return 2;
-		case DXGI_FORMAT_R16_FLOAT: return 2;
-		case DXGI_FORMAT_R32_FLOAT: return 4;
-	}
-	ASSERT(false);
-	return 0;
-}
-
 bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, u32 flags, const void* data, const char* debug_name)
 {
 	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
 	const bool no_mips = flags & (u32)TextureFlags::NO_MIPS;
+	const bool readback = flags & (u32)TextureFlags::READBACK;
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
 	Texture& texture = d3d.textures[handle.value];
 	D3D11_TEXTURE2D_DESC desc = {};
@@ -1631,6 +1672,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	desc.Height = h;
 	desc.ArraySize = depth;
 	desc.MipLevels = mip_count;
+	desc.Usage = D3D11_USAGE_DEFAULT;
 	desc.CPUAccessFlags = 0;
 	desc.Format = getDXGIFormat(format);
 	if(isDepthFormat(desc.Format)) {
@@ -1639,9 +1681,13 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	else {
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 	}
+	if (readback) {
+		desc.Usage = D3D11_USAGE_STAGING;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		desc.BindFlags = 0;
+	}
 	desc.MiscFlags = 0;
 	desc.SampleDesc.Count = 1;
-	desc.Usage = D3D11_USAGE_DEFAULT;
 	texture.dxgi_format = desc.Format;
 	Array<Array<u8>> mips_data(*d3d.allocator);
 	mips_data.reserve(mip_count - 1);
@@ -1657,6 +1703,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			ptr += w * h * bytes_per_pixel;
 			for (u32 mip = 1; mip < mip_count; ++mip) {
 				// TODO generate mips
+				// d3d.device_ctx->GenerateMips()
 				Array<u8>& mip_data = mips_data.emplace(*d3d.allocator);
 				const u32 mip_w = maximum(w >> mip, 1);
 				const u32 mip_h = maximum(h >> mip, 1);
@@ -1677,13 +1724,15 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
 	}
 
-	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-	srv_desc.Format = toViewFormat(desc.Format);
-	srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-	srv_desc.Texture2D.MipLevels = mip_count;
+	if (!readback) {
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+		srv_desc.Format = toViewFormat(desc.Format);
+		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		srv_desc.Texture2D.MipLevels = mip_count;
 
-	d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
-	return false;
+		d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
+	}
+	return true;
 }
 
 void setState(u64 state)
@@ -2315,6 +2364,6 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
     return true;    
 }
 
-} // ns ffr
+} // ns gpu
 
 } // ns Lumix
