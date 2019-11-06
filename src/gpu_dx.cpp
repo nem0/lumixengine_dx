@@ -880,6 +880,7 @@ void destroy(QueryHandle query) {
 }
 
 void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
+	d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	d3d.device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
