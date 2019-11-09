@@ -817,6 +817,7 @@ QueryHandle createQuery() {
 	D3D11_QUERY_DESC desc = {};
 	desc.Query = D3D11_QUERY_TIMESTAMP;
 	d3d.device->CreateQuery(&desc, &d3d.queries[idx].query);
+	ASSERT(d3d.queries[idx].query);
 	return { (u32)idx }; 
 }
 
@@ -1243,7 +1244,7 @@ void swapBuffers(u32 w, u32 h)
 	}
 
 	const IVec2 size(w, h);
-	if(size != d3d.size) {
+	if(size != d3d.size && w != 0) {
 		d3d.size = size;
 		d3d.default_framebuffer.depth_stencil->Release();
 		d3d.default_framebuffer.render_targets[0]->Release();
