@@ -76,6 +76,7 @@ int getSize(AttributeType type) {
 	switch(type) {
 		case AttributeType::FLOAT: return 4;
 		case AttributeType::U8: return 1;
+		case AttributeType::I8: return 1;
 		case AttributeType::I16: return 2;
 		default: ASSERT(false); return 0;
 	}
@@ -2076,6 +2077,13 @@ static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
 				case 2: return DXGI_FORMAT_R32G32_FLOAT;
 				case 3: return DXGI_FORMAT_R32G32B32_FLOAT;
 				case 4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+			}
+			break;
+		case AttributeType::I8: 
+			switch(attr.components_count) {
+				case 1: return DXGI_FORMAT_R8_SNORM;
+				case 2: return DXGI_FORMAT_R8G8_SNORM;
+				case 4: return DXGI_FORMAT_R8G8B8A8_SNORM;
 			}
 			break;
 		case AttributeType::U8: 
