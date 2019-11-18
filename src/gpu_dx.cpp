@@ -64,6 +64,8 @@ static u32 getSize(DXGI_FORMAT format) {
 		case DXGI_FORMAT_R8G8B8A8_UNORM: return 4;
 		case DXGI_FORMAT_R16G16B16A16_UNORM: return 8;
 		case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
+		case DXGI_FORMAT_R32G32B32_FLOAT: return 12;
+		case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16;
 		case DXGI_FORMAT_R16_UNORM: return 2;
 		case DXGI_FORMAT_R16_FLOAT: return 2;
 		case DXGI_FORMAT_R32_FLOAT: return 4;
@@ -93,6 +95,7 @@ static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 		case TextureFormat::RGBA8: return DXGI_FORMAT_R8G8B8A8_UNORM;
 		case TextureFormat::RGBA16: return DXGI_FORMAT_R16G16B16A16_UNORM;
 		case TextureFormat::RGBA16F: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+		case TextureFormat::RGBA32F: return DXGI_FORMAT_R32G32B32A32_FLOAT;
 		case TextureFormat::R16: return DXGI_FORMAT_R16_UNORM;
 		case TextureFormat::R16F: return DXGI_FORMAT_R16_FLOAT;
 		case TextureFormat::R32F: return DXGI_FORMAT_R32_FLOAT;
@@ -155,7 +158,10 @@ struct Buffer {
 };
 
 struct Texture {
-	ID3D11Texture2D* texture2D;
+	union {
+		ID3D11Texture2D* texture2D;
+		ID3D11Texture3D* texture3D;
+	};
 	union {
 		ID3D11RenderTargetView* rtv;
 		struct {
@@ -923,14 +929,13 @@ void copy(TextureHandle dst_handle, TextureHandle src_handle) {
 	d3d.device_ctx->CopyResource(dst.texture2D, src.texture2D);
 }
 
-void readTexture(TextureHandle handle, u32 size, void* buf) {
+void readTexture(TextureHandle handle, Span<u8> buf) {
 	Texture& texture = d3d.textures[handle.value];
-	ASSERT(texture.dxgi_format == DXGI_FORMAT_R8G8B8A8_UNORM);
 
 	D3D11_MAPPED_SUBRESOURCE data;
 	d3d.device_ctx->Map(texture.texture2D, 0, D3D11_MAP_READ, 0, &data);
-	ASSERT(data.DepthPitch == size);
-	memcpy(buf, data.pData, size);
+	ASSERT(data.DepthPitch == buf.length());
+	memcpy(buf.begin(), data.pData, buf.length());
 	d3d.device_ctx->Unmap(texture.texture2D, 0);
 }
 
@@ -1668,39 +1673,72 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	return true;
 }
 
-static void fillMip(const u8* src, u32 w, u32 h, u8* out) {
-	stbir_resize_uint8(src, w, h, 0, out, maximum(1, w >> 1), maximum(1, h >> 1), 0, 4);
-}
-
 bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, u32 flags, const void* data, const char* debug_name)
 {
 	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
 	const bool no_mips = flags & (u32)TextureFlags::NO_MIPS;
 	const bool readback = flags & (u32)TextureFlags::READBACK;
+	const bool is_3d = flags & (u32)TextureFlags::IS_3D;
+
+	switch (format) {
+		case TextureFormat::R8:
+		case TextureFormat::RGBA8:
+		case TextureFormat::RGBA32F:
+		case TextureFormat::R32F:
+		case TextureFormat::SRGB:
+		case TextureFormat::SRGBA: break;
+		
+		case TextureFormat::R16:
+		case TextureFormat::RGBA16:
+		case TextureFormat::R16F: 
+		case TextureFormat::RGBA16F: 
+		case TextureFormat::D32: 
+		case TextureFormat::D24: 
+		case TextureFormat::D24S8: ASSERT(no_mips); break;
+		default: ASSERT(false); return false;
+	}
+
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
 	Texture& texture = d3d.textures[handle.value];
-	D3D11_TEXTURE2D_DESC desc = {};
-	desc.Width = w;
-	desc.Height = h;
-	desc.ArraySize = depth;
-	desc.MipLevels = mip_count;
-	desc.Usage = D3D11_USAGE_DEFAULT;
-	desc.CPUAccessFlags = 0;
-	desc.Format = getDXGIFormat(format);
-	if(isDepthFormat(desc.Format)) {
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL;
+	D3D11_TEXTURE3D_DESC desc_3d = {};
+
+	D3D11_TEXTURE2D_DESC desc_2d = {};
+	
+	auto fill_desc = [&](auto& desc){
+		desc.Width = w;
+		desc.Height = h;
+		desc.MipLevels = mip_count;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.CPUAccessFlags = 0;
+		desc.Format = getDXGIFormat(format);
+		if(isDepthFormat(desc.Format)) {
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL;
+		}
+		else {
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		}
+		if (readback) {
+			desc.Usage = D3D11_USAGE_STAGING;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			desc.BindFlags = 0;
+		}
+		desc.MiscFlags = 0;
+		texture.dxgi_format = desc.Format;
+	};
+
+	u32 bytes_per_pixel ;
+	if (is_3d) {
+		fill_desc(desc_3d);
+		desc_3d.Depth = depth;
+		bytes_per_pixel = getSize(desc_3d.Format);
 	}
 	else {
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		fill_desc(desc_2d);
+		desc_2d.SampleDesc.Count = 1;
+		desc_2d.ArraySize = depth;
+		bytes_per_pixel = getSize(desc_2d.Format);
 	}
-	if (readback) {
-		desc.Usage = D3D11_USAGE_STAGING;
-		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-		desc.BindFlags = 0;
-	}
-	desc.MiscFlags = 0;
-	desc.SampleDesc.Count = 1;
-	texture.dxgi_format = desc.Format;
+
 	Array<Array<u8>> mips_data(*d3d.allocator);
 	mips_data.reserve(mip_count - 1);
 	if(data) {
@@ -1708,10 +1746,12 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		const u8* ptr = (u8*)data;
 		
 		// TODO some formats are transformed to different sized dxgi formats
-		u32 bytes_per_pixel = getSize(desc.Format);
+		u32 idx = 0;
 		for(u32 layer = 0; layer < depth; ++layer) {
-			srd[0].pSysMem = ptr;
-			srd[0].SysMemPitch = w * bytes_per_pixel;
+			srd[idx].pSysMem = ptr;
+			srd[idx].SysMemPitch = w * bytes_per_pixel;
+			srd[idx].SysMemSlicePitch = h * srd[idx].SysMemPitch;
+			++idx;
 			u32 prev_mip_w = w;
 			u32 prev_mip_h = h;
 			const u8* prev_mip_data = ptr;
@@ -1721,19 +1761,49 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 				const u32 mip_w = maximum(w >> mip, 1);
 				const u32 mip_h = maximum(h >> mip, 1);
 				mip_data.resize(bytes_per_pixel * mip_w * mip_h);
-				fillMip(prev_mip_data, prev_mip_w, prev_mip_h, mip_data.begin());
+				switch(format) {
+					case TextureFormat::R8:
+						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 1);
+						break;
+					case TextureFormat::SRGBA:
+					case TextureFormat::RGBA8:
+						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 4);
+						break;
+					case TextureFormat::SRGB:
+						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 3);
+						break;
+					case TextureFormat::R32F:
+						stbir_resize_float((const float*)prev_mip_data, prev_mip_w, prev_mip_h, 0, (float*)mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 1);
+						break;
+					case TextureFormat::RGBA32F:
+						stbir_resize_float((const float*)prev_mip_data, prev_mip_w, prev_mip_h, 0, (float*)mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 4);
+						break;
+					default: ASSERT(false); return false;
+				}
 				prev_mip_w = mip_w;
 				prev_mip_h = mip_h;
 				prev_mip_data = mip_data.begin();
-				const u32 idx = mip + layer * mip_count;
 				srd[idx].pSysMem = mip_data.begin();
 				srd[idx].SysMemPitch = mip_w * bytes_per_pixel;
+				srd[idx].SysMemSlicePitch = mip_h * srd[idx].SysMemPitch;
+				++idx;
 			}
 		}
-		d3d.device->CreateTexture2D(&desc, srd, &texture.texture2D);
+
+		if (is_3d) {
+			d3d.device->CreateTexture3D(&desc_3d, srd, &texture.texture3D);
+		}
+		else {
+			d3d.device->CreateTexture2D(&desc_2d, srd, &texture.texture2D);
+		}
 	}
 	else {
-		d3d.device->CreateTexture2D(&desc, nullptr, &texture.texture2D);
+		if (is_3d) {
+			d3d.device->CreateTexture3D(&desc_3d, nullptr, &texture.texture3D);
+		}
+		else {
+			d3d.device->CreateTexture2D(&desc_2d, nullptr, &texture.texture2D);
+		}
 	}
 	ASSERT(texture.texture2D);
 
@@ -1743,11 +1813,19 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 	if (!readback) {
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-		srv_desc.Format = toViewFormat(desc.Format);
-		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-		srv_desc.Texture2D.MipLevels = mip_count;
+		if (is_3d) {
+			srv_desc.Format = toViewFormat(desc_3d.Format);
+			srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+			srv_desc.Texture3D.MipLevels = mip_count;
+			d3d.device->CreateShaderResourceView(texture.texture3D, &srv_desc, &texture.srv);
+		}
+		else {
+			srv_desc.Format = toViewFormat(desc_2d.Format);
+			srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+			srv_desc.Texture2D.MipLevels = mip_count;
+			d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
+		}
 
-		d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 	}
 	return true;
 }
