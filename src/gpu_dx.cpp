@@ -170,6 +170,7 @@ struct Texture {
 		};
 	};
 	ID3D11ShaderResourceView* srv;
+	ID3D11SamplerState* sampler;
 	DXGI_FORMAT dxgi_format;
 };
 
@@ -189,7 +190,6 @@ static struct {
 	ID3D11DeviceContext1* device_ctx = nullptr;
 	ID3D11Device* device = nullptr;
 	ID3DUserDefinedAnnotation* annotation = nullptr;
-	ID3D11SamplerState* default_sampler = nullptr;
 	ID3D11Query* disjoint_query = nullptr;
 	bool disjoint_waiting = false;
 	u64 query_frequency = 1;
@@ -206,6 +206,7 @@ static struct {
 		ID3D11RenderTargetView* render_targets[16];
 		u32 count = 0;
 	};
+	ID3D11SamplerState* samplers[2*2*2*2];
 
 	FrameBuffer current_framebuffer;
 	FrameBuffer default_framebuffer;
@@ -896,6 +897,7 @@ void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) 
 	Texture& texture = d3d.textures[texture_handle.value];
 	Texture& view = d3d.textures[view_handle.value];
 	view.dxgi_format = texture.dxgi_format;
+	view.sampler = texture.sampler;
 	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 	texture.srv->GetDesc(&srv_desc);
 	if (srv_desc.ViewDimension != D3D_SRV_DIMENSION_TEXTURE2D) {
@@ -1072,17 +1074,6 @@ bool init(void* hwnd, u32 flags) {
 	d3d.current_framebuffer = d3d.default_framebuffer;
 
 	d3d.device_ctx->QueryInterface(IID_ID3DUserDefinedAnnotation, (void**)&d3d.annotation);
-
-	D3D11_SAMPLER_DESC sampler_desc = {};
-	sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-	sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-	sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-	sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
-	sampler_desc.MipLODBias = 0.f;
-	sampler_desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
-	sampler_desc.MinLOD = 0.f;
-	sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-	d3d.device->CreateSamplerState(&sampler_desc, &d3d.default_sampler);
 
 	if(debug) {
 		ID3D11Debug* d3d_debug = nullptr;
@@ -1380,6 +1371,24 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 	++attributes_count;
 }
 
+ID3D11SamplerState* getSampler(u32 flags) {
+	const u32 idx = flags & 0b1111;
+	if (!d3d.samplers[idx]) {
+		D3D11_SAMPLER_DESC sampler_desc = {};
+		sampler_desc.Filter = (flags & (u32)TextureFlags::POINT_FILTER) ? D3D11_FILTER_MIN_MAG_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+		sampler_desc.AddressU = (flags & (u32)TextureFlags::CLAMP_U) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
+		sampler_desc.AddressV = (flags & (u32)TextureFlags::CLAMP_V) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
+		sampler_desc.AddressW = (flags & (u32)TextureFlags::CLAMP_W) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
+		sampler_desc.MipLODBias = 0.f;
+		sampler_desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+		sampler_desc.MinLOD = 0.f;
+		sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+		d3d.device->CreateSamplerState(&sampler_desc, &d3d.samplers[idx]);
+	}
+
+	return d3d.samplers[idx];
+}
+
 bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, const char* debug_name) { 
 	ASSERT(debug_name && debug_name[0]);
 	checkThread();
@@ -1551,125 +1560,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 		ASSERT(SUCCEEDED(hr));
 	}
 
-	/*
-	const GLenum texture_target = is_cubemap ? GL_TEXTURE_CUBE_MAP : layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
+	texture.sampler = getSampler(flags);
 
-	GLuint texture;
-	CHECK_GL(glCreateTextures(texture_target, 1, &texture));
-	if (texture == 0) {
-		return false;
-	}
-	if(layers > 1) {
-		CHECK_GL(glTextureStorage3D(texture, mipMapCount, internal_format, hdr.dwWidth, hdr.dwHeight, layers));
-	}
-	else {
-		CHECK_GL(glTextureStorage2D(texture, mipMapCount, internal_format, hdr.dwWidth, hdr.dwHeight));
-	}
-	if (debug_name && debug_name[0]) {
-		CHECK_GL(glObjectLabel(GL_TEXTURE, texture, stringLength(debug_name), debug_name));
-	}
-
-	for (int layer = 0; layer < layers; ++layer) {
-		for(int side = 0; side < (is_cubemap ? 6 : 1); ++side) {
-			const GLenum tex_img_target =  is_cubemap ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + side : layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
-			u32 width = hdr.dwWidth;
-			u32 height = hdr.dwHeight;
-
-			if (li->compressed) {
-				u32 size = DDS::sizeDXTC(width, height, internal_format);
-				if (size != hdr.dwPitchOrLinearSize || (hdr.dwFlags & DDS::DDSD_LINEARSIZE) == 0) {
-					CHECK_GL(glDeleteTextures(1, &texture));
-					return false;
-				}
-				Array<u8> data(*d3d.allocator);
-				data.resize(size);
-				for (u32 mip = 0; mip < mipMapCount; ++mip) {
-					blob.read(&data[0], size);
-					//DDS::flipCompressedTexture(width, height, internal_format, &data[0]);
-					if(layers > 1) {
-						CHECK_GL(glCompressedTextureSubImage3D(texture, mip, 0, 0, layer, width, height, 1, internal_format, size, &data[0]));
-					}
-					else if (is_cubemap) {
-						ASSERT(layer == 0);
-						CHECK_GL(glCompressedTextureSubImage3D(texture, mip, 0, 0, side, width, height, 1, internal_format, size, &data[0]));
-					}
-					else {
-						CHECK_GL(glCompressedTextureSubImage2D(texture, mip, 0, 0, width, height, internal_format, size, &data[0]));
-					}
-					CHECK_GL(glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
-					CHECK_GL(glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
-					width = maximum(1, width >> 1);
-					height = maximum(1, height >> 1);
-					size = DDS::sizeDXTC(width, height, internal_format);
-				}
-			}
-			else if (li->palette) {
-				if ((hdr.dwFlags & DDS::DDSD_PITCH) == 0 || hdr.pixelFormat.dwRGBBitCount != 8) {
-					CHECK_GL(glDeleteTextures(1, &texture));
-					return false;
-				}
-				u32 size = hdr.dwPitchOrLinearSize * height;
-				if (size != width * height * li->blockBytes) {
-					CHECK_GL(glDeleteTextures(1, &texture));
-					return false;
-				}
-				Array<u8> data(*d3d.allocator);
-				data.resize(size);
-				u32 palette[256];
-				Array<u32> unpacked(*d3d.allocator);
-				unpacked.resize(size);
-				blob.read(palette, 4 * 256);
-				for (u32 mip = 0; mip < mipMapCount; ++mip) {
-					blob.read(&data[0], size);
-					for (u32 zz = 0; zz < size; ++zz) {
-						unpacked[zz] = palette[data[zz]];
-					}
-					//glPixelStorei(GL_UNPACK_ROW_LENGTH, height);
-					if(layers > 1) {
-						CHECK_GL(glTextureSubImage3D(texture, mip, 0, 0, layer, width, height, 1, li->externalFormat, li->type, &unpacked[0]));
-					}
-					else {
-						CHECK_GL(glTextureSubImage2D(texture, mip, 0, 0, width, height, li->externalFormat, li->type, &unpacked[0]));
-					}
-					width = maximum(1, width >> 1);
-					height = maximum(1, height >> 1);
-					size = width * height * li->blockBytes;
-				}
-			}
-			else {
-				if (li->swap) {
-					CHECK_GL(glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE));
-				}
-				u32 size = width * height * li->blockBytes;
-				Array<u8> data(*d3d.allocator);
-				data.resize(size);
-				for (u32 mip = 0; mip < mipMapCount; ++mip) {
-					blob.read(&data[0], size);
-					//glPixelStorei(GL_UNPACK_ROW_LENGTH, height);
-					if (layers > 1) {
-						CHECK_GL(glTextureSubImage3D(texture, mip, 0, 0, layer, width, height, 1, li->externalFormat, li->type, &data[0]));
-					}
-					else {
-						CHECK_GL(glTextureSubImage2D(texture, mip, 0, 0, width, height, li->externalFormat, li->type, &data[0]));
-					}
-					width = maximum(1, width >> 1);
-					height = maximum(1, height >> 1);
-					size = width * height * li->blockBytes;
-				}
-				CHECK_GL(glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE));
-			}
-			CHECK_GL(glTextureParameteri(texture, GL_TEXTURE_MAX_LEVEL, mipMapCount - 1));
-		}
-	}
-
-	const GLint wrap = (flags & (u32)TextureFlags::CLAMP) ? GL_CLAMP : GL_REPEAT;
-	CHECK_GL(glTextureParameteri(texture, GL_TEXTURE_WRAP_S, wrap));
-	CHECK_GL(glTextureParameteri(texture, GL_TEXTURE_WRAP_T, wrap));
-	
-	Texture& t = d3d.textures[handle.value];
-	t.dxgi_format = internal_format;
-	t.handle = texture;
-	t.target = is_cubemap ? GL_TEXTURE_CUBE_MAP : layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;*/
 	return true;
 }
 
@@ -1700,8 +1592,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
 	Texture& texture = d3d.textures[handle.value];
-	D3D11_TEXTURE3D_DESC desc_3d = {};
+	texture.sampler = getSampler(flags);
 
+	D3D11_TEXTURE3D_DESC desc_3d = {};
 	D3D11_TEXTURE2D_DESC desc_2d = {};
 	
 	auto fill_desc = [&](auto& desc){
@@ -2090,8 +1983,15 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	ID3D11ShaderResourceView* views[16];
 	ID3D11SamplerState* samplers[16];
 	for (u32 i = 0; i < count; ++i) {
-		views[i] = handles[i].isValid() ? d3d.textures[handles[i].value].srv : nullptr;
-		samplers[i] = d3d.default_sampler;
+		if (handles[i].isValid()) {
+			const Texture& texture = d3d.textures[handles[i].value];
+			views[i] = texture.srv;
+			samplers[i] = texture.sampler;
+		}
+		else {
+			views[i] = nullptr;
+			samplers[i] = nullptr;
+		}
 	}
 	d3d.device_ctx->VSSetShaderResources(offset, count, views);
 	d3d.device_ctx->PSSetShaderResources(offset, count, views);
