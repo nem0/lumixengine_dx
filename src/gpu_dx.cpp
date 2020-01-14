@@ -4,6 +4,7 @@
 #include "../external/include/spirv_cross/spirv_hlsl.hpp"
 #include "engine/array.h"
 #include "engine/crc32.h"
+#include "engine/hash_map.h"
 #include "engine/log.h"
 #include "engine/math.h"
 #include "engine/mt/sync.h"
@@ -105,44 +106,47 @@ static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 	return DXGI_FORMAT_R8G8B8A8_UINT;
 }
 
-template <typename T, int MAX_COUNT>
+template <typename T, u32 MAX_COUNT>
 struct Pool
 {
-	void create(IAllocator& allocator)
+	void init()
 	{
-		values = (T*)allocator.allocate(sizeof(T) * MAX_COUNT);
-		for(int i = 0; i < MAX_COUNT; ++i) {
-			*((int*)&values[i]) = i + 1;
+		values = (T*)mem;
+		for (int i = 0; i < MAX_COUNT; ++i) {
+			new (&values[i]) int(i + 1);
 		}
-		*((int*)&values[MAX_COUNT - 1]) = -1;	
+		new (&values[MAX_COUNT - 1]) int(-1);
 		first_free = 0;
-	}
-
-	void destroy(IAllocator& allocator)
-	{
-		allocator.deallocate(values);
 	}
 
 	int alloc()
 	{
 		if(first_free == -1) return -1;
 
+		++count;
 		const int id = first_free;
 		first_free = *((int*)&values[id]);
+		new (&values[id]) T;
 		return id;
 	}
 
 	void dealloc(u32 idx)
 	{
+		--count;
+		values[idx].~T();
 		*((int*)&values[idx]) = first_free;
 		first_free = idx;
 	}
 
+	alignas(T) u8 mem[sizeof(T) * MAX_COUNT];
 	T* values;
 	int first_free;
+	u32 count = 0;
 
 	T& operator[](int idx) { return values[idx]; }
 	bool isFull() const { return first_free == -1; }
+
+	static constexpr u32 CAPACITY = MAX_COUNT;
 };
 
 struct Program {
@@ -153,7 +157,7 @@ struct Program {
 };
 
 struct Buffer {
-	ID3D11Buffer* buffer;
+	ID3D11Buffer* buffer = nullptr;
 	u8* mapped_ptr = nullptr;
 	bool is_constant_buffer = false;
 };
@@ -183,7 +187,32 @@ struct InputLayout {
 	ID3D11InputLayout* layout;
 };
 
-static struct {
+static struct D3D {
+	bool initialized = false;
+
+	struct FrameBuffer {
+		ID3D11DepthStencilView* depth_stencil = nullptr;
+		ID3D11RenderTargetView* render_targets[16];
+		u32 count = 0;
+	};
+
+	struct Window { 
+		void* handle = nullptr;
+		IDXGISwapChain* swapchain = nullptr;
+		FrameBuffer framebuffer;
+		IVec2 size = IVec2(800, 600);
+	};
+	
+	struct State {
+		ID3D11DepthStencilState* dss;
+		ID3D11RasterizerState* rs;
+		ID3D11BlendState* bs;
+	};
+
+	D3D() 
+		: state_cache(state_allocator) 
+	{}
+
 	DWORD thread;
 	RENDERDOC_API_1_0_2* rdoc_api;
 	IAllocator* allocator = nullptr;
@@ -200,24 +229,17 @@ static struct {
 	Pool<Program, 256> programs;
 	Pool<Buffer, 8192> buffers;
 	Pool<Texture, 4096> textures;
-	struct FrameBuffer {
-		ID3D11DepthStencilView* depth_stencil = nullptr;
-		ID3D11RenderTargetView* render_targets[16];
-		u32 count = 0;
-	};
-
-	struct Window { 
-		void* handle = nullptr;
-		IDXGISwapChain* swapchain = nullptr;
-		FrameBuffer framebuffer;
-		IVec2 size = IVec2(800, 600);
-	};
 	Window windows[64];
 	Window* current_window = windows;
 	ID3D11SamplerState* samplers[2*2*2*2];
 
 	FrameBuffer current_framebuffer;
 	BufferHandle uniform_buffer_tmp;
+
+	DefaultAllocator state_allocator;
+	HashMap<u64, State> state_cache;
+	HMODULE d3d_dll;
+	HMODULE dxgi_dll;
 } d3d;
 
 namespace DDS
@@ -976,22 +998,64 @@ void preinit(IAllocator& allocator)
 {
 	try_load_renderdoc();
 	d3d.allocator = &allocator;
-	d3d.textures.create(*d3d.allocator);
-	d3d.buffers.create(*d3d.allocator);
-	d3d.programs.create(*d3d.allocator);
-	d3d.queries.create(*d3d.allocator);
+	d3d.textures.init();
+	d3d.buffers.init();
+	d3d.programs.init();
+	d3d.queries.init();
 }
 
 void shutdown() {
 	ShFinalize();
-	// TODO
-	d3d.textures.destroy(*d3d.allocator);
-	d3d.buffers.destroy(*d3d.allocator);
-	d3d.programs.destroy(*d3d.allocator);
-	d3d.queries.destroy(*d3d.allocator);
+
+	ASSERT(d3d.buffers.count == 0);
+	ASSERT(d3d.programs.count == 0);
+	ASSERT(d3d.queries.count == 0);
+	ASSERT(d3d.textures.count == 0);
+
+	for (const D3D::State& s : d3d.state_cache) {
+		s.bs->Release();
+		s.dss->Release();
+		s.rs->Release();
+	}
+	d3d.state_cache.clear();
+
+	for (ID3D11SamplerState*& sampler : d3d.samplers) {
+		if (!sampler) continue;
+
+		sampler->Release();
+		sampler = nullptr;
+	}
+
+	for (D3D::Window& w : d3d.windows) {
+		if (!w.handle) continue;
+
+		if (w.framebuffer.depth_stencil) {
+			w.framebuffer.depth_stencil->Release();
+			w.framebuffer.depth_stencil = nullptr;
+		}
+		for (u32 i = 0; i < w.framebuffer.count; ++i) {
+			w.framebuffer.render_targets[i]->Release();
+		}
+		w.framebuffer.count = 0;
+		w.swapchain->Release();
+	}
+
+	d3d.disjoint_query->Release();
+	d3d.annotation->Release();
+	d3d.device_ctx->Release();
+	d3d.device->Release();
+
+	FreeLibrary(d3d.d3d_dll);
+	FreeLibrary(d3d.dxgi_dll);
 }
 
 bool init(void* hwnd, u32 flags) {
+	if (d3d.initialized) {
+		// we don't support reinitialization
+		ASSERT(false);
+		return false;
+	}
+
 	bool debug = flags & (u32)InitFlags::DEBUG_OUTPUT;
 	#ifdef LUMIX_DEBUG
 		debug = true;
@@ -1009,9 +1073,19 @@ bool init(void* hwnd, u32 flags) {
 	const int width = rect.right - rect.left;
 	const int height = rect.bottom - rect.top;
 
-	HMODULE lib = LoadLibrary("d3d11.dll");
+	d3d.d3d_dll = LoadLibrary("d3d11.dll");
+	d3d.dxgi_dll = LoadLibrary("dxgi.dll");
+	if (!d3d.d3d_dll) {
+		logError("gpu") << "Failed to load d3d11.dll";
+		return false;
+	}
+	if (!d3d.dxgi_dll) {
+		logError("gpu") << "Failed to load dxgi.dll";
+		return false;
+	}
+
 	#define DECL_D3D_API(f) \
-		auto api_##f = (decltype(f)*)GetProcAddress(lib, #f);
+		auto api_##f = (decltype(f)*)GetProcAddress(d3d.d3d_dll, #f);
 	
 	DECL_D3D_API(D3D11CreateDeviceAndSwapChain);
 	
@@ -1127,6 +1201,7 @@ bool init(void* hwnd, u32 flags) {
 	d3d.uniform_buffer_tmp = allocBufferHandle();
 	createBuffer(d3d.uniform_buffer_tmp, (u32)BufferFlags::UNIFORM_BUFFER, 256, nullptr);
 
+	d3d.initialized = true;
 	return true;
 }
 
@@ -1254,58 +1329,68 @@ void setCurrentWindow(void* window_handle)
 	}
 
 	for (auto& window : d3d.windows) {
-		if (!window.handle) {
-			window.handle = window_handle;
-			d3d.current_window = &window;
-			RECT rect;
-			GetClientRect((HWND)window_handle, &rect);
-			window.size = IVec2(rect.right - rect.left, rect.bottom - rect.top);
-			d3d.current_window = &window;
+		if (window.handle) continue;
 
-			const int width = rect.right - rect.left;
-			const int height = rect.bottom - rect.top;
+		window.handle = window_handle;
+		d3d.current_window = &window;
+		RECT rect;
+		GetClientRect((HWND)window_handle, &rect);
+		window.size = IVec2(rect.right - rect.left, rect.bottom - rect.top);
+		d3d.current_window = &window;
 
-			HMODULE dxgi_dll = LoadLibrary("dxgi.dll");
-			typedef HRESULT (WINAPI* PFN_CREATE_DXGI_FACTORY)(REFIID _riid, void** _factory);
-			PFN_CREATE_DXGI_FACTORY CreateDXGIFactory1 = (PFN_CREATE_DXGI_FACTORY)GetProcAddress(dxgi_dll, "CreateDXGIFactory1");
+		const int width = rect.right - rect.left;
+		const int height = rect.bottom - rect.top;
+
+		typedef HRESULT (WINAPI* PFN_CREATE_DXGI_FACTORY)(REFIID _riid, void** _factory);
+		static const GUID IID_IDXGIFactory    = { 0x7b7166ec, 0x21c7, 0x44ae, { 0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69 } };
+		PFN_CREATE_DXGI_FACTORY CreateDXGIFactory1 = (PFN_CREATE_DXGI_FACTORY)GetProcAddress(d3d.dxgi_dll, "CreateDXGIFactory1");
 			
-			static const GUID IID_IDXGIFactory    = { 0x7b7166ec, 0x21c7, 0x44ae, { 0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69 } };
-			::IDXGIFactory5* factory;
-			CreateDXGIFactory1(IID_IDXGIFactory, (void**)&factory);
+		::IDXGIFactory5* factory;
+		CreateDXGIFactory1(IID_IDXGIFactory, (void**)&factory);
 
-			DXGI_SWAP_CHAIN_DESC desc = {};
-			desc.BufferDesc.Width = width;
-			desc.BufferDesc.Height = height;
-			desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-			desc.BufferDesc.RefreshRate.Numerator = 60;
-			desc.BufferDesc.RefreshRate.Denominator = 1;
-			desc.OutputWindow = (HWND)window_handle;
-			desc.Windowed = true;
-			desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-			desc.BufferCount = 1;
-			desc.SampleDesc.Count = 1;
-			desc.SampleDesc.Quality = 0;
-			desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-			desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-			HRESULT hr = factory->CreateSwapChain(d3d.device, &desc, &window.swapchain);
+		DXGI_SWAP_CHAIN_DESC desc = {};
+		desc.BufferDesc.Width = width;
+		desc.BufferDesc.Height = height;
+		desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.BufferDesc.RefreshRate.Numerator = 60;
+		desc.BufferDesc.RefreshRate.Denominator = 1;
+		desc.OutputWindow = (HWND)window_handle;
+		desc.Windowed = true;
+		desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+		desc.BufferCount = 1;
+		desc.SampleDesc.Count = 1;
+		desc.SampleDesc.Quality = 0;
+		desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+		desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+		HRESULT hr = factory->CreateSwapChain(d3d.device, &desc, &window.swapchain);
 
-			if(!SUCCEEDED(hr)) return;
-
-			ID3D11Texture2D* rt;
-			hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
-			if(!SUCCEEDED(hr)) return;
-
-			hr = d3d.device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &window.framebuffer.render_targets[0]);
-			rt->Release();
-			if(!SUCCEEDED(hr)) return;
-			window.framebuffer.count = 1;
-	
-			d3d.current_framebuffer = window.framebuffer;
-			factory->Release();
+		if(!SUCCEEDED(hr)) {
+			logError("gpu") << "Failed to create swapchain";
 			return;
 		}
+
+		ID3D11Texture2D* rt;
+		hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
+		if(!SUCCEEDED(hr)) {
+			logError("gpu") << "Failed to get swapchain's buffer";
+			return;
+		}
+
+		hr = d3d.device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &window.framebuffer.render_targets[0]);
+		rt->Release();
+		if(!SUCCEEDED(hr)) {
+			logError("gpu") << "Failed to create RTV";
+			return;
+		}
+
+		window.framebuffer.count = 1;
+	
+		d3d.current_framebuffer = window.framebuffer;
+		factory->Release();
+		return;
 	}
 
+	logError("gpu") << "Too many windows created.";
 	ASSERT(false);
 }
 
@@ -1390,7 +1475,8 @@ void swapBuffers()
 
 void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 {
-	Buffer& buffer= d3d.buffers[handle.value];
+	Buffer& buffer = d3d.buffers[handle.value];
+	ASSERT(!buffer.buffer);
 	D3D11_BUFFER_DESC desc = {};
 	desc.ByteWidth = (UINT)size;
 	buffer.is_constant_buffer = flags & (u32)BufferFlags::UNIFORM_BUFFER;
@@ -1825,133 +1911,135 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 void setState(u64 state)
 {
-	D3D11_BLEND_DESC blend_desc = {};
-	D3D11_RASTERIZER_DESC desc = {};
-	D3D11_DEPTH_STENCIL_DESC depthStencilDesc = {};
+	auto iter = d3d.state_cache.find(state);
+	if (!iter.isValid()) {
+		D3D11_BLEND_DESC blend_desc = {};
+		D3D11_RASTERIZER_DESC desc = {};
+		D3D11_DEPTH_STENCIL_DESC depthStencilDesc = {};
 	
-	if (state & u64(StateFlags::CULL_BACK)) {
-		desc.CullMode = D3D11_CULL_BACK;
-	}
-	else if(state & u64(StateFlags::CULL_FRONT)) {
-		desc.CullMode = D3D11_CULL_FRONT;
-	}
-	else {
-		desc.CullMode = D3D11_CULL_NONE;
-	}
-
-	desc.FrontCounterClockwise = TRUE;
-	desc.FillMode =  (state & u64(StateFlags::WIREFRAME)) != 0 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
-	desc.ScissorEnable = (state & u64(StateFlags::SCISSOR_TEST)) != 0;
-	desc.DepthClipEnable = FALSE;
-
-	depthStencilDesc.DepthEnable = (state & u64(StateFlags::DEPTH_TEST)) != 0;
-	depthStencilDesc.DepthWriteMask = (state & u64(StateFlags::DEPTH_WRITE)) != 0 ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-	depthStencilDesc.DepthFunc = (state & u64(StateFlags::DEPTH_TEST)) != 0 ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_ALWAYS;
-
-	const StencilFuncs func = (StencilFuncs)((state >> 30) & 0xf);
-	depthStencilDesc.StencilEnable = func != StencilFuncs::DISABLE; 
-	u8 stencil_ref = 0;
-	if(depthStencilDesc.StencilEnable) {
-
-		depthStencilDesc.StencilReadMask = u8(state >> 42);
-		depthStencilDesc.StencilWriteMask = u8(state >> 42);
-		stencil_ref = u8(state >> 34);
-		D3D11_COMPARISON_FUNC dx_func;
-		switch(func) {
-			case StencilFuncs::ALWAYS: dx_func = D3D11_COMPARISON_ALWAYS; break;
-			case StencilFuncs::EQUAL: dx_func = D3D11_COMPARISON_EQUAL; break;
-			case StencilFuncs::NOT_EQUAL: dx_func = D3D11_COMPARISON_NOT_EQUAL; break;
-			default: ASSERT(false); break;
+		if (state & u64(StateFlags::CULL_BACK)) {
+			desc.CullMode = D3D11_CULL_BACK;
 		}
-		auto toDXOp = [](StencilOps op) {
-			constexpr D3D11_STENCIL_OP table[] = {
-				D3D11_STENCIL_OP_KEEP,
-				D3D11_STENCIL_OP_ZERO,
-				D3D11_STENCIL_OP_REPLACE,
-				D3D11_STENCIL_OP_INCR_SAT,
-				D3D11_STENCIL_OP_DECR_SAT,
-				D3D11_STENCIL_OP_INVERT,
-				D3D11_STENCIL_OP_INCR,
-				D3D11_STENCIL_OP_DECR
-			};
-			return table[(int)op];
-		};
-		const D3D11_STENCIL_OP sfail = toDXOp(StencilOps((state >> 50) & 0xf));
-		const D3D11_STENCIL_OP zfail = toDXOp(StencilOps((state >> 54) & 0xf));
-		const D3D11_STENCIL_OP zpass = toDXOp(StencilOps((state >> 58) & 0xf));
-
-		depthStencilDesc.FrontFace.StencilFailOp = sfail;
-		depthStencilDesc.FrontFace.StencilDepthFailOp = zfail;
-		depthStencilDesc.FrontFace.StencilPassOp = zpass;
-		depthStencilDesc.FrontFace.StencilFunc = dx_func;
-
-		depthStencilDesc.BackFace.StencilFailOp = sfail;
-		depthStencilDesc.BackFace.StencilDepthFailOp = zfail;
-		depthStencilDesc.BackFace.StencilPassOp = zpass;
-		depthStencilDesc.BackFace.StencilFunc = dx_func;
-	}
-
-	u16 blend_bits = u16(state >> 6);
-
-	auto to_dx = [&](BlendFactors factor) -> D3D11_BLEND {
-		static const D3D11_BLEND table[] = {
-			D3D11_BLEND_ZERO,
-			D3D11_BLEND_ONE,
-			D3D11_BLEND_SRC_COLOR,
-			D3D11_BLEND_INV_SRC_COLOR,
-			D3D11_BLEND_SRC_ALPHA,
-			D3D11_BLEND_INV_SRC_ALPHA,
-			D3D11_BLEND_DEST_COLOR,
-			D3D11_BLEND_INV_DEST_COLOR,
-			D3D11_BLEND_DEST_ALPHA,
-			D3D11_BLEND_INV_DEST_ALPHA
-		};
-		return table[(int)factor];
-	};
-
-	for(u32 rt_idx = 0; rt_idx < (u32)lengthOf(blend_desc.RenderTarget); ++rt_idx) {
-		if (blend_bits) {
-			const BlendFactors src_rgb = (BlendFactors)(blend_bits & 0xf);
-			const BlendFactors dst_rgb = (BlendFactors)((blend_bits >> 4) & 0xf);
-			const BlendFactors src_a = (BlendFactors)((blend_bits >> 8) & 0xf);
-			const BlendFactors dst_a = (BlendFactors)((blend_bits >> 12) & 0xf);
-		
-			blend_desc.RenderTarget[rt_idx].BlendEnable = true;
-			blend_desc.AlphaToCoverageEnable = false;
-			blend_desc.RenderTarget[rt_idx].SrcBlend = to_dx(src_rgb);
-			blend_desc.RenderTarget[rt_idx].DestBlend = to_dx(dst_rgb);
-			blend_desc.RenderTarget[rt_idx].BlendOp = D3D11_BLEND_OP_ADD;
-			blend_desc.RenderTarget[rt_idx].SrcBlendAlpha = to_dx(src_a);
-			blend_desc.RenderTarget[rt_idx].DestBlendAlpha = to_dx(dst_a);
-			blend_desc.RenderTarget[rt_idx].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-			blend_desc.RenderTarget[rt_idx].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		else if(state & u64(StateFlags::CULL_FRONT)) {
+			desc.CullMode = D3D11_CULL_FRONT;
 		}
 		else {
-			blend_desc.RenderTarget[rt_idx].BlendEnable = false;
-			blend_desc.RenderTarget[rt_idx].SrcBlend = D3D11_BLEND_SRC_ALPHA;
-			blend_desc.RenderTarget[rt_idx].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-			blend_desc.RenderTarget[rt_idx].BlendOp = D3D11_BLEND_OP_ADD;
-			blend_desc.RenderTarget[rt_idx].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
-			blend_desc.RenderTarget[rt_idx].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-			blend_desc.RenderTarget[rt_idx].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-			blend_desc.RenderTarget[rt_idx].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+			desc.CullMode = D3D11_CULL_NONE;
 		}
+
+		desc.FrontCounterClockwise = TRUE;
+		desc.FillMode =  (state & u64(StateFlags::WIREFRAME)) != 0 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
+		desc.ScissorEnable = (state & u64(StateFlags::SCISSOR_TEST)) != 0;
+		desc.DepthClipEnable = FALSE;
+
+		depthStencilDesc.DepthEnable = (state & u64(StateFlags::DEPTH_TEST)) != 0;
+		depthStencilDesc.DepthWriteMask = (state & u64(StateFlags::DEPTH_WRITE)) != 0 ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+		depthStencilDesc.DepthFunc = (state & u64(StateFlags::DEPTH_TEST)) != 0 ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_ALWAYS;
+
+		const StencilFuncs func = (StencilFuncs)((state >> 30) & 0xf);
+		depthStencilDesc.StencilEnable = func != StencilFuncs::DISABLE; 
+		if(depthStencilDesc.StencilEnable) {
+
+			depthStencilDesc.StencilReadMask = u8(state >> 42);
+			depthStencilDesc.StencilWriteMask = u8(state >> 42);
+			D3D11_COMPARISON_FUNC dx_func;
+			switch(func) {
+				case StencilFuncs::ALWAYS: dx_func = D3D11_COMPARISON_ALWAYS; break;
+				case StencilFuncs::EQUAL: dx_func = D3D11_COMPARISON_EQUAL; break;
+				case StencilFuncs::NOT_EQUAL: dx_func = D3D11_COMPARISON_NOT_EQUAL; break;
+				default: ASSERT(false); break;
+			}
+			auto toDXOp = [](StencilOps op) {
+				constexpr D3D11_STENCIL_OP table[] = {
+					D3D11_STENCIL_OP_KEEP,
+					D3D11_STENCIL_OP_ZERO,
+					D3D11_STENCIL_OP_REPLACE,
+					D3D11_STENCIL_OP_INCR_SAT,
+					D3D11_STENCIL_OP_DECR_SAT,
+					D3D11_STENCIL_OP_INVERT,
+					D3D11_STENCIL_OP_INCR,
+					D3D11_STENCIL_OP_DECR
+				};
+				return table[(int)op];
+			};
+			const D3D11_STENCIL_OP sfail = toDXOp(StencilOps((state >> 50) & 0xf));
+			const D3D11_STENCIL_OP zfail = toDXOp(StencilOps((state >> 54) & 0xf));
+			const D3D11_STENCIL_OP zpass = toDXOp(StencilOps((state >> 58) & 0xf));
+
+			depthStencilDesc.FrontFace.StencilFailOp = sfail;
+			depthStencilDesc.FrontFace.StencilDepthFailOp = zfail;
+			depthStencilDesc.FrontFace.StencilPassOp = zpass;
+			depthStencilDesc.FrontFace.StencilFunc = dx_func;
+
+			depthStencilDesc.BackFace.StencilFailOp = sfail;
+			depthStencilDesc.BackFace.StencilDepthFailOp = zfail;
+			depthStencilDesc.BackFace.StencilPassOp = zpass;
+			depthStencilDesc.BackFace.StencilFunc = dx_func;
+		}
+
+		u16 blend_bits = u16(state >> 6);
+
+		auto to_dx = [&](BlendFactors factor) -> D3D11_BLEND {
+			static const D3D11_BLEND table[] = {
+				D3D11_BLEND_ZERO,
+				D3D11_BLEND_ONE,
+				D3D11_BLEND_SRC_COLOR,
+				D3D11_BLEND_INV_SRC_COLOR,
+				D3D11_BLEND_SRC_ALPHA,
+				D3D11_BLEND_INV_SRC_ALPHA,
+				D3D11_BLEND_DEST_COLOR,
+				D3D11_BLEND_INV_DEST_COLOR,
+				D3D11_BLEND_DEST_ALPHA,
+				D3D11_BLEND_INV_DEST_ALPHA
+			};
+			return table[(int)factor];
+		};
+
+		for(u32 rt_idx = 0; rt_idx < (u32)lengthOf(blend_desc.RenderTarget); ++rt_idx) {
+			if (blend_bits) {
+				const BlendFactors src_rgb = (BlendFactors)(blend_bits & 0xf);
+				const BlendFactors dst_rgb = (BlendFactors)((blend_bits >> 4) & 0xf);
+				const BlendFactors src_a = (BlendFactors)((blend_bits >> 8) & 0xf);
+				const BlendFactors dst_a = (BlendFactors)((blend_bits >> 12) & 0xf);
+		
+				blend_desc.RenderTarget[rt_idx].BlendEnable = true;
+				blend_desc.AlphaToCoverageEnable = false;
+				blend_desc.RenderTarget[rt_idx].SrcBlend = to_dx(src_rgb);
+				blend_desc.RenderTarget[rt_idx].DestBlend = to_dx(dst_rgb);
+				blend_desc.RenderTarget[rt_idx].BlendOp = D3D11_BLEND_OP_ADD;
+				blend_desc.RenderTarget[rt_idx].SrcBlendAlpha = to_dx(src_a);
+				blend_desc.RenderTarget[rt_idx].DestBlendAlpha = to_dx(dst_a);
+				blend_desc.RenderTarget[rt_idx].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+				blend_desc.RenderTarget[rt_idx].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+			}
+			else {
+				blend_desc.RenderTarget[rt_idx].BlendEnable = false;
+				blend_desc.RenderTarget[rt_idx].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+				blend_desc.RenderTarget[rt_idx].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+				blend_desc.RenderTarget[rt_idx].BlendOp = D3D11_BLEND_OP_ADD;
+				blend_desc.RenderTarget[rt_idx].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
+				blend_desc.RenderTarget[rt_idx].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+				blend_desc.RenderTarget[rt_idx].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+				blend_desc.RenderTarget[rt_idx].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+			}
+		}
+
+		D3D::State s;
+		d3d.device->CreateDepthStencilState(&depthStencilDesc, &s.dss);
+		d3d.device->CreateRasterizerState(&desc, &s.rs);
+		d3d.device->CreateBlendState(&blend_desc, &s.bs);
+
+		d3d.state_cache.insert(state, s);
+		iter = d3d.state_cache.find(state);
 	}
 
+	const u8 stencil_ref = u8(state >> 34);
+	const D3D::State& s = iter.value();
 
-	// TODO cache states
-	ID3D11DepthStencilState* dss;
-	d3d.device->CreateDepthStencilState(&depthStencilDesc, &dss);
-	d3d.device_ctx->OMSetDepthStencilState(dss, stencil_ref);
-
-	ID3D11RasterizerState* rs;
-	d3d.device->CreateRasterizerState(&desc, &rs);
-	d3d.device_ctx->RSSetState(rs);
-
-	ID3D11BlendState* bs;
-	d3d.device->CreateBlendState(&blend_desc, &bs);
 	float blend_factor[4] = {};
-	d3d.device_ctx->OMSetBlendState(bs, blend_factor, 0xffFFffFF);
+	d3d.device_ctx->OMSetDepthStencilState(s.dss, stencil_ref);
+	d3d.device_ctx->RSSetState(s.rs);
+	d3d.device_ctx->OMSetBlendState(s.bs, blend_factor, 0xffFFffFF);
 }
 
 void viewport(u32 x, u32 y, u32 w, u32 h)
@@ -2404,8 +2492,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 			, &output
 			, &errors);
 		if (errors) {
-			auto e = (LPCSTR)errors->GetBufferPointer();
-			OutputDebugString(e);
+			logError("gpu") << (LPCSTR)errors->GetBufferPointer();
 			errors->Release(); // TODO
 			if (!output) {
 				return false;
@@ -2416,23 +2503,19 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 		void* ptr = output->GetBufferPointer();
 		size_t len = output->GetBufferSize();
 
+		HRESULT hr;
 		switch(type) {
 			case ShaderType::VERTEX:
 				// TODO errors
 				vs_bytecode = ptr;
 				vs_bytecode_len = len;
-				d3d.device->CreateVertexShader(ptr, len, nullptr, &program.vs);
+				hr = d3d.device->CreateVertexShader(ptr, len, nullptr, &program.vs);
 				break;
-			case ShaderType::FRAGMENT:
-				d3d.device->CreatePixelShader(ptr, len, nullptr, &program.ps);
-				break;
-			case ShaderType::GEOMETRY:
-				d3d.device->CreateGeometryShader(ptr, len, nullptr, &program.gs);
-				break;
-			default:
-				ASSERT(false);
+			case ShaderType::FRAGMENT: hr = d3d.device->CreatePixelShader(ptr, len, nullptr, &program.ps); break;
+			case ShaderType::GEOMETRY: hr = d3d.device->CreateGeometryShader(ptr, len, nullptr, &program.gs); break;
+			default: ASSERT(false); break;
 		}
-		return true;
+		return SUCCEEDED(hr);
 	};
 
 	auto compile_stage = [&](ShaderType type){
