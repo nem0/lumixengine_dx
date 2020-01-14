@@ -11,6 +11,7 @@
 #include <Windows.h>
 #include <d3d11_1.h>
 #include <dxgi.h>
+#include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <cassert>
 #include <malloc.h>
@@ -1254,9 +1255,53 @@ void setCurrentWindow(void* window_handle)
 
 	for (auto& window : d3d.windows) {
 		if (!window.handle) {
-			ASSERT(false); // TODO
 			window.handle = window_handle;
 			d3d.current_window = &window;
+			RECT rect;
+			GetClientRect((HWND)window_handle, &rect);
+			window.size = IVec2(rect.right - rect.left, rect.bottom - rect.top);
+			d3d.current_window = &window;
+
+			const int width = rect.right - rect.left;
+			const int height = rect.bottom - rect.top;
+
+			HMODULE dxgi_dll = LoadLibrary("dxgi.dll");
+			typedef HRESULT (WINAPI* PFN_CREATE_DXGI_FACTORY)(REFIID _riid, void** _factory);
+			PFN_CREATE_DXGI_FACTORY CreateDXGIFactory1 = (PFN_CREATE_DXGI_FACTORY)GetProcAddress(dxgi_dll, "CreateDXGIFactory1");
+			
+			static const GUID IID_IDXGIFactory    = { 0x7b7166ec, 0x21c7, 0x44ae, { 0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69 } };
+			::IDXGIFactory5* factory;
+			CreateDXGIFactory1(IID_IDXGIFactory, (void**)&factory);
+
+			DXGI_SWAP_CHAIN_DESC desc = {};
+			desc.BufferDesc.Width = width;
+			desc.BufferDesc.Height = height;
+			desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			desc.BufferDesc.RefreshRate.Numerator = 60;
+			desc.BufferDesc.RefreshRate.Denominator = 1;
+			desc.OutputWindow = (HWND)window_handle;
+			desc.Windowed = true;
+			desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+			desc.BufferCount = 1;
+			desc.SampleDesc.Count = 1;
+			desc.SampleDesc.Quality = 0;
+			desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+			desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+			HRESULT hr = factory->CreateSwapChain(d3d.device, &desc, &window.swapchain);
+
+			if(!SUCCEEDED(hr)) return;
+
+			ID3D11Texture2D* rt;
+			hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
+			if(!SUCCEEDED(hr)) return;
+
+			hr = d3d.device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &window.framebuffer.render_targets[0]);
+			rt->Release();
+			if(!SUCCEEDED(hr)) return;
+			window.framebuffer.count = 1;
+	
+			d3d.current_framebuffer = window.framebuffer;
+			factory->Release();
 			return;
 		}
 	}
@@ -1291,7 +1336,12 @@ void swapBuffers()
 		const IVec2 size(rect.right - rect.left, rect.bottom - rect.top);
 		if (size != window.size && size.x != 0) {
 			window.size = size;
-			window.framebuffer.depth_stencil->Release();
+			bool has_ds = false;
+			if (window.framebuffer.depth_stencil) {
+				has_ds = true;
+				window.framebuffer.depth_stencil->Release();
+				window.framebuffer.depth_stencil = nullptr;
+			}
 			window.framebuffer.render_targets[0]->Release();
 
 			ID3D11Texture2D* rt;
@@ -1306,32 +1356,33 @@ void swapBuffers()
 			ASSERT(SUCCEEDED(hr));
 			window.framebuffer.count = 1;
 		
-			D3D11_TEXTURE2D_DESC ds_desc;
-			memset(&ds_desc, 0, sizeof(ds_desc));
-			ds_desc.Width = size.x;
-			ds_desc.Height = size.y;
-			ds_desc.MipLevels = 1;
-			ds_desc.ArraySize = 1;
-			ds_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-			ds_desc.SampleDesc.Count = 1;
-			ds_desc.SampleDesc.Quality = 0;
-			ds_desc.Usage = D3D11_USAGE_DEFAULT;
-			ds_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+			if (has_ds) {
+				D3D11_TEXTURE2D_DESC ds_desc;
+				memset(&ds_desc, 0, sizeof(ds_desc));
+				ds_desc.Width = size.x;
+				ds_desc.Height = size.y;
+				ds_desc.MipLevels = 1;
+				ds_desc.ArraySize = 1;
+				ds_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+				ds_desc.SampleDesc.Count = 1;
+				ds_desc.SampleDesc.Quality = 0;
+				ds_desc.Usage = D3D11_USAGE_DEFAULT;
+				ds_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
 
-			ID3D11Texture2D* ds;
-			hr = d3d.device->CreateTexture2D(&ds_desc, NULL, &ds);
-			ASSERT(SUCCEEDED(hr));
+				ID3D11Texture2D* ds;
+				hr = d3d.device->CreateTexture2D(&ds_desc, NULL, &ds);
+				ASSERT(SUCCEEDED(hr));
 
-			D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc;
-			memset(&dsv_desc, 0, sizeof(dsv_desc));
-			dsv_desc.Format = ds_desc.Format;
-			dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-			dsv_desc.Texture2D.MipSlice = 0;
+				D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc;
+				memset(&dsv_desc, 0, sizeof(dsv_desc));
+				dsv_desc.Format = ds_desc.Format;
+				dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+				dsv_desc.Texture2D.MipSlice = 0;
 
-			hr = d3d.device->CreateDepthStencilView((ID3D11Resource*)ds, &dsv_desc, &window.framebuffer.depth_stencil);
-			ASSERT(SUCCEEDED(hr));
-			ds->Release();
-
+				hr = d3d.device->CreateDepthStencilView((ID3D11Resource*)ds, &dsv_desc, &window.framebuffer.depth_stencil);
+				ASSERT(SUCCEEDED(hr));
+				ds->Release();
+			}
 		}
 	}
 	d3d.current_framebuffer = d3d.windows[0].framebuffer;
