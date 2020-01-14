@@ -216,6 +216,7 @@ static struct {
 	ID3D11SamplerState* samplers[2*2*2*2];
 
 	FrameBuffer current_framebuffer;
+	BufferHandle uniform_buffer_tmp;
 } d3d;
 
 namespace DDS
@@ -1122,6 +1123,8 @@ bool init(void* hwnd, u32 flags) {
 
 	d3d.device_ctx->Begin(d3d.disjoint_query);
 	d3d.disjoint_waiting = false;
+	d3d.uniform_buffer_tmp = allocBufferHandle();
+	createBuffer(d3d.uniform_buffer_tmp, (u32)BufferFlags::UNIFORM_BUFFER, 256, nullptr);
 
 	return true;
 }
@@ -2001,12 +2004,26 @@ void destroy(BufferHandle buffer) {
 }
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
-	ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
-	ASSERT(offset % 16 == 0);
-	const UINT first = (UINT)offset / 16;
-	const UINT num = ((UINT)size + 255) / 256 * 16;
-	d3d.device_ctx->VSSetConstantBuffers1(index, 1, &b, &first, &num);
-	d3d.device_ctx->PSSetConstantBuffers1(index, 1, &b, &first, &num);
+	// VSSetConstantBuffers1 needs dx11.1 and that would mean no win7 support
+	if (offset != 0) {
+		ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
+		ID3D11Buffer* tmp_b = d3d.buffers[d3d.uniform_buffer_tmp.value].buffer;
+		D3D11_BOX box;
+		box.left = (UINT)offset;
+		box.right = UINT(offset + size);
+		box.top = 0;
+		box.bottom = 1;
+		box.front = 0;
+		box.back = 1;
+		d3d.device_ctx->CopySubresourceRegion(tmp_b, 0, 0, 0, 0, b, 0, &box);
+		d3d.device_ctx->VSSetConstantBuffers(index, 1, &tmp_b);
+		d3d.device_ctx->PSSetConstantBuffers(index, 1, &tmp_b);	
+	}
+	else {
+		ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
+		d3d.device_ctx->VSSetConstantBuffers(index, 1, &b);
+		d3d.device_ctx->PSSetConstantBuffers(index, 1, &b);
+	}
 }
 
 void bindIndexBuffer(BufferHandle handle) {
