@@ -2480,7 +2480,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 		ID3DBlob* output = NULL;
 		ID3DBlob* errors = NULL;
 
-		D3DCompile(src
+		HRESULT hr = D3DCompile(src
 			, strlen(src) + 1
 			, name
 			, NULL
@@ -2492,18 +2492,20 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 			, &output
 			, &errors);
 		if (errors) {
-			logError("gpu") << (LPCSTR)errors->GetBufferPointer();
-			errors->Release(); // TODO
-			if (!output) {
-				return false;
+			if (SUCCEEDED(hr)) {
+				logInfo("gpu") << (LPCSTR)errors->GetBufferPointer();
 			}
+			else {
+				logError("gpu") << (LPCSTR)errors->GetBufferPointer();
+			}
+			errors->Release();
+			if (FAILED(hr)) return false;
 		}
 		ASSERT(output);
 
 		void* ptr = output->GetBufferPointer();
 		size_t len = output->GetBufferSize();
 
-		HRESULT hr;
 		switch(type) {
 			case ShaderType::VERTEX:
 				// TODO errors
