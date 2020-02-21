@@ -7,7 +7,7 @@
 #include "engine/hash_map.h"
 #include "engine/log.h"
 #include "engine/math.h"
-#include "engine/mt/sync.h"
+#include "engine/sync.h"
 #include "engine/stream.h"
 #include <Windows.h>
 #include <d3d11_1.h>
@@ -119,14 +119,15 @@ struct Pool
 		first_free = 0;
 	}
 
-	int alloc()
+	template <typename... Args>
+	int alloc(Args&&... args)
 	{
 		if(first_free == -1) return -1;
 
 		++count;
 		const int id = first_free;
 		first_free = *((int*)&values[id]);
-		new (&values[id]) T;
+		new (&values[id]) T(args...);
 		return id;
 	}
 
@@ -160,6 +161,14 @@ struct Buffer {
 	ID3D11Buffer* buffer = nullptr;
 	u8* mapped_ptr = nullptr;
 	bool is_constant_buffer = false;
+};
+
+struct BufferGroup {
+	BufferGroup(IAllocator& alloc) : data(alloc) {}
+	ID3D11Buffer* buffer = nullptr;
+	Array<u8> data;
+	size_t element_size = 0;
+	size_t elements_count = 0;
 };
 
 struct Texture {
@@ -224,10 +233,11 @@ static struct D3D {
 	u64 query_frequency = 1;
 
 	BufferHandle current_index_buffer = INVALID_BUFFER;
-	MT::CriticalSection handle_mutex;
+	Mutex handle_mutex;
 	Pool<Query, 2048> queries;
 	Pool<Program, 256> programs;
 	Pool<Buffer, 8192> buffers;
+	Pool<BufferGroup, 64> buffer_groups;
 	Pool<Texture, 4096> textures;
 	Window windows[64];
 	Window* current_window = windows;
@@ -849,7 +859,7 @@ static DXGI_FORMAT toDSViewFormat(DXGI_FORMAT format) {
 
 QueryHandle createQuery() {
 	checkThread();
-	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	MutexGuard lock(d3d.handle_mutex);
 	const int idx = d3d.queries.alloc();
 	d3d.queries[idx] = {};
 	D3D11_QUERY_DESC desc = {};
@@ -886,7 +896,7 @@ void destroy(ProgramHandle program) {
 	if (p.vs) p.vs->Release();
 	if (p.il) p.il->Release();
 
-	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	MutexGuard lock(d3d.handle_mutex);
 	d3d.programs.dealloc(program.value);
 }
 
@@ -905,7 +915,7 @@ void destroy(TextureHandle texture) {
 
 	if (t.texture2D) t.texture2D->Release();
 
-	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	MutexGuard lock(d3d.handle_mutex);
 	d3d.textures.dealloc(texture.value);
 }
 
@@ -914,7 +924,7 @@ void destroy(QueryHandle query) {
 
 	d3d.queries[query.value].query->Release();
 
-	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	MutexGuard lock(d3d.handle_mutex);
 	d3d.queries.dealloc(query.value);
 }
 
@@ -999,6 +1009,7 @@ void preinit(IAllocator& allocator)
 	try_load_renderdoc();
 	d3d.allocator = &allocator;
 	d3d.textures.init();
+	d3d.buffer_groups.init();
 	d3d.buffers.init();
 	d3d.programs.init();
 	d3d.queries.init();
@@ -1011,6 +1022,7 @@ void shutdown() {
 	ASSERT(d3d.programs.count == 0);
 	ASSERT(d3d.queries.count == 0);
 	ASSERT(d3d.textures.count == 0);
+	ASSERT(d3d.buffer_groups.count == 0);
 
 	for (const D3D::State& s : d3d.state_cache) {
 		s.bs->Release();
@@ -1308,8 +1320,6 @@ void unmap(BufferHandle handle)
 	buffer.mapped_ptr = nullptr;
 }
 
-Backend getBackend() { return Backend::DX11; }
-
 bool getMemoryStats(Ref<MemoryStats> stats) { return false; }
 
 void setCurrentWindow(void* window_handle)
@@ -1499,9 +1509,37 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer.buffer);
 }
 
+
+void createBufferGroup(BufferGroupHandle handle, u32 flags, size_t element_size, size_t elements_count, const void* data)
+{
+	BufferGroup& buffer = d3d.buffer_groups[handle.value];
+	ASSERT(!buffer.buffer);
+	D3D11_BUFFER_DESC desc = {};
+	desc.ByteWidth = (UINT)element_size;
+	ASSERT(flags & (u32)BufferFlags::UNIFORM_BUFFER);
+	desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; 
+
+	if (flags & (u32)BufferFlags::IMMUTABLE) {
+		desc.Usage = D3D11_USAGE_IMMUTABLE;
+	}
+	else {
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+		desc.Usage = D3D11_USAGE_DYNAMIC;
+	}
+	D3D11_SUBRESOURCE_DATA initial_data = {};
+	buffer.element_size = element_size;
+	buffer.elements_count = elements_count;
+	buffer.data.resize(u32(elements_count * element_size));
+	if (data) {
+		memcpy(buffer.data.begin(), data, buffer.data.byte_size());
+	}
+	initial_data.pSysMem = nullptr;
+	d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer.buffer);
+}
+
 ProgramHandle allocProgramHandle()
 {
-	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	MutexGuard lock(d3d.handle_mutex);
 
 	if(d3d.programs.isFull()) {
 		logError("Renderer") << "Not enough free program slots.";
@@ -1515,7 +1553,7 @@ ProgramHandle allocProgramHandle()
 
 BufferHandle allocBufferHandle()
 {
-	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	MutexGuard lock(d3d.handle_mutex);
 
 	if(d3d.buffers.isFull()) {
 		logError("Renderer") << "Not enough free buffer slots.";
@@ -1527,9 +1565,22 @@ BufferHandle allocBufferHandle()
 	return { (u32)id };
 }
 
+BufferGroupHandle allocBufferGroupHandle()
+{
+	MutexGuard lock(d3d.handle_mutex);
+
+	if(d3d.buffer_groups.isFull()) {
+		logError("Renderer") << "Not enough free buffer group slots.";
+		return INVALID_BUFFER_GROUP;
+	}
+	const int id = d3d.buffer_groups.alloc(*d3d.allocator);
+	BufferGroup& t = d3d.buffer_groups[id];
+	return { (u32)id };
+}
+
 TextureHandle allocTextureHandle()
 {
-	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	MutexGuard lock(d3d.handle_mutex);
 
 	if(d3d.textures.isFull()) {
 		logError("Renderer") << "Not enough free texture slots.";
@@ -2138,8 +2189,30 @@ void destroy(BufferHandle buffer) {
 	Buffer& t = d3d.buffers[buffer.value];
 	t.buffer->Release();
 
-	MT::CriticalSectionLock lock(d3d.handle_mutex);
+	MutexGuard lock(d3d.handle_mutex);
 	d3d.buffers.dealloc(buffer.value);
+}
+
+void destroy(BufferGroupHandle buffer) {
+	checkThread();
+	
+	BufferGroup& t = d3d.buffer_groups[buffer.value];
+	t.buffer->Release();
+
+	MutexGuard lock(d3d.handle_mutex);
+	d3d.buffers.dealloc(buffer.value);
+}
+
+void bindUniformBuffer(u32 ub_index, BufferGroupHandle group, size_t element_index) {
+	BufferGroup& g = d3d.buffer_groups[group.value];
+	
+	D3D11_MAPPED_SUBRESOURCE msr;
+	d3d.device_ctx->Map(g.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
+	memcpy((u8*)msr.pData, g.data.begin() + g.element_size * element_index, g.element_size);
+	d3d.device_ctx->Unmap(g.buffer, 0);
+
+	d3d.device_ctx->VSSetConstantBuffers(ub_index, 1, &g.buffer);
+	d3d.device_ctx->PSSetConstantBuffers(ub_index, 1, &g.buffer);
 }
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
@@ -2215,7 +2288,6 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 }
 
 void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType index_type) {
-	
 	D3D11_PRIMITIVE_TOPOLOGY pt;
 	switch (primitive_type) {
 		case PrimitiveType::TRIANGLES: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
@@ -2239,6 +2311,16 @@ void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType 
 	d3d.device_ctx->DrawIndexed(count, offset >> offset_shift, 0);
 }
 
+void updatePart(BufferHandle buffer, const void* data, size_t offset, size_t size) {
+	checkThread();
+	const Buffer& b = d3d.buffers[buffer.value];
+	ASSERT(!b.mapped_ptr);
+	D3D11_MAPPED_SUBRESOURCE msr;
+	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
+	memcpy((u8*)msr.pData, data, size);
+	d3d.device_ctx->Unmap(b.buffer, 0);
+}
+
 void update(BufferHandle buffer, const void* data, size_t size) {
 	checkThread();
 	const Buffer& b = d3d.buffers[buffer.value];
@@ -2247,6 +2329,12 @@ void update(BufferHandle buffer, const void* data, size_t size) {
 	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
 	memcpy((u8*)msr.pData, data, size);
 	d3d.device_ctx->Unmap(b.buffer, 0);
+}
+
+void update(BufferGroupHandle handle, const void* data, size_t element_index) {
+	checkThread();
+	const BufferGroup& b = d3d.buffer_groups[handle.value];
+	memcpy(b.data.begin() + b.element_size * element_index, data, b.element_size);
 }
 
 static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
