@@ -2200,6 +2200,11 @@ void destroy(BufferGroupHandle buffer) {
 	d3d.buffers.dealloc(buffer.value);
 }
 
+void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 offset, u32 size)
+{
+	ASSERT(false); // TODO
+}
+
 void bindUniformBuffer(u32 ub_index, BufferGroupHandle group, size_t element_index) {
 	BufferGroup& g = d3d.buffer_groups[group.value];
 	
