@@ -159,6 +159,7 @@ struct Program {
 
 struct Buffer {
 	ID3D11Buffer* buffer = nullptr;
+	ID3D11ShaderResourceView* srv = nullptr;
 	u8* mapped_ptr = nullptr;
 	bool is_constant_buffer = false;
 };
@@ -459,12 +460,10 @@ struct LoadInfo {
 	bool swap;
 	bool palette;
 	u32 blockBytes;
+	u32 block_width;
+	u32 block_height;
 	DXGI_FORMAT format;
 	DXGI_FORMAT srgb_format;
-	/*GLenum internalFormat;
-	GLenum internalSRGBFormat;
-	GLenum externalFormat;
-	GLenum type;*/
 };
 
 static u32 sizeDXTC(u32 w, u32 h, DXGI_FORMAT format) {
@@ -552,19 +551,19 @@ static bool isINDEX8(const PixelFormat& pf)
 }
 
 static LoadInfo loadInfoDXT1 = {
-	true, false, false, 8, DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_UNORM_SRGB
+	true, false, false, 8, 4, 4, DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_UNORM_SRGB
 };
 static LoadInfo loadInfoDXT3 = {
-	true, false, false, 16, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC2_UNORM_SRGB
+	true, false, false, 16, 4, 4, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC2_UNORM_SRGB
 };
 static LoadInfo loadInfoDXT5 = {
-	true, false, false, 16, DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC3_UNORM_SRGB
+	true, false, false, 16, 4, 4, DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC3_UNORM_SRGB
 };
 static LoadInfo loadInfoATI1 = {
-	true, false, false, 8, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_UNKNOWN
+	true, false, false, 8, 4, 4, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_UNKNOWN
 };
 static LoadInfo loadInfoATI2 = {
-	true, false, false, 16, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_UNKNOWN
+	true, false, false, 16, 4, 4, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_UNKNOWN
 };
 static LoadInfo loadInfoBGRA8 = {
 //	false, false, false, 4, GL_RGBA8, GL_SRGB8_ALPHA8, GL_BGRA, GL_UNSIGNED_BYTE
@@ -1272,10 +1271,6 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 		}
 	}
 	
-	ID3D11ShaderResourceView * tmp[16] = {};
-	d3d.device_ctx->VSSetShaderResources(0, lengthOf(tmp), tmp);
-	d3d.device_ctx->PSSetShaderResources(0, lengthOf(tmp), tmp);
-
 	d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
 }
 
@@ -1492,6 +1487,10 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	}
 	else {
 		desc.BindFlags = D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER; 
+		if(flags & (u32)BufferFlags::SHADER_BUFFER) {
+			desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+		}
 	}
 
 	if (flags & (u32)BufferFlags::IMMUTABLE) {
@@ -1504,6 +1503,18 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	D3D11_SUBRESOURCE_DATA initial_data = {};
 	initial_data.pSysMem = data;
 	d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer.buffer);
+
+	if(flags & (u32)BufferFlags::SHADER_BUFFER) {
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+		srv_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+		srv_desc.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+		srv_desc.BufferEx.FirstElement = 0;
+		ASSERT(size % 16 == 0);
+		srv_desc.BufferEx.NumElements = UINT(size / 4);
+
+		d3d.device->CreateShaderResourceView(buffer.buffer, &srv_desc, &buffer.srv);
+	}
 }
 
 
@@ -1721,8 +1732,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	if (is_cubemap) {
 		D3D11_TEXTURE2D_DESC desc = {};
 
-		desc.Width = hdr.dwWidth;
-		desc.Height = hdr.dwHeight;
+		desc.Width = maximum(li->block_width, hdr.dwWidth);
+		desc.Height = maximum(li->block_width, hdr.dwHeight);
 		desc.ArraySize = 6;
 		desc.MipLevels = mip_count;
 		desc.CPUAccessFlags = 0;
@@ -1746,8 +1757,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	} else if (layers > 1) {
 		D3D11_TEXTURE2D_DESC desc = {};
 
-		desc.Width = hdr.dwWidth;
-		desc.Height = hdr.dwHeight;
+		desc.Width = maximum(li->block_width, hdr.dwWidth);
+		desc.Height = maximum(li->block_width, hdr.dwHeight);
 		desc.ArraySize = layers;
 		desc.MipLevels = mip_count;
 		desc.CPUAccessFlags = 0;
@@ -1771,8 +1782,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 		ASSERT(SUCCEEDED(hr));
 	} else {
 		D3D11_TEXTURE2D_DESC desc = {};
-		desc.Width = hdr.dwWidth;
-		desc.Height = hdr.dwHeight;
+		desc.Width = maximum(li->block_width, hdr.dwWidth);
+		desc.Height = maximum(li->block_width, hdr.dwHeight);
 		desc.ArraySize = layers;
 		desc.MipLevels = mip_count;
 		desc.CPUAccessFlags = 0;
@@ -2185,6 +2196,7 @@ void destroy(BufferHandle buffer) {
 	
 	Buffer& t = d3d.buffers[buffer.value];
 	t.buffer->Release();
+	if (t.srv) t.srv->Release();
 
 	MutexGuard lock(d3d.handle_mutex);
 	d3d.buffers.dealloc(buffer.value);
@@ -2200,9 +2212,20 @@ void destroy(BufferGroupHandle buffer) {
 	d3d.buffers.dealloc(buffer.value);
 }
 
-void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 offset, u32 size)
+void bindShaderBuffer(BufferHandle buffer, u32 binding_point)
 {
-	ASSERT(false); // TODO
+	if(buffer.isValid()) {
+		Buffer& b = d3d.buffers[buffer.value];
+		ASSERT(b.srv);
+		d3d.device_ctx->VSSetShaderResources(binding_point, 1, &b.srv);
+		d3d.device_ctx->PSSetShaderResources(binding_point, 1, &b.srv);
+	}
+	else {
+		ID3D11ShaderResourceView* srv = nullptr;
+		d3d.device_ctx->VSSetShaderResources(binding_point, 1, &srv);
+		d3d.device_ctx->PSSetShaderResources(binding_point, 1, &srv);
+	
+	}
 }
 
 void bindUniformBuffer(u32 ub_index, BufferGroupHandle group, size_t element_index) {
@@ -2475,10 +2498,10 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 
 	glslang::TShader shader(lang);
 	shader.setStrings(srcs, count);
-	shader.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientOpenGL, 420);
+	shader.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientOpenGL, 430);
 	shader.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetClientVersion::EShTargetOpenGL_450);
 	shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetLanguageVersion::EShTargetSpv_1_4);
-	auto res2 = shader.parse(&DefaultTBuiltInResource, 420, false, EShMsgDefault);
+	auto res2 = shader.parse(&DefaultTBuiltInResource, 430, false, EShMsgDefault);
 	const char* log = shader.getInfoLog();
 	if(!res2) {
 		logError("Renderer") << shader_name << ": " << log;
@@ -2531,21 +2554,27 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 	};
 
 	const char* tmp[128];
-	auto filter_srcs = [&](ShaderType type) {
+	auto filter_srcs = [&](ShaderType type) -> u32 {
+		switch (type) {
+			case ShaderType::GEOMETRY: tmp[0] = "#define LUMIX_GEOMETRY_SHADER\n"; break;
+			case ShaderType::FRAGMENT: tmp[0] = "#define LUMIX_FRAGMENT_SHADER\n"; break;
+			case ShaderType::VERTEX: tmp[0] = "#define LUMIX_VERTEX_SHADER\n"; break;
+			default: ASSERT(false); return 0;
+		}
 		for(u32 i = 0; i < prefixes_count; ++i) {
-			tmp[i] = prefixes[i];
+			tmp[i + 1] = prefixes[i];
 		}
 		for (u32 i = 0; i < decl.attributes_count; ++i) {
-			tmp[i + prefixes_count] = attr_defines[decl.attributes[i].idx]; 
+			tmp[i + 1 + prefixes_count] = attr_defines[decl.attributes[i].idx]; 
 		}
 
 		u32 sc = 0;
 		for(u32 i = 0; i < num; ++i) {
 			if(types[i] != type) continue;
-			tmp[prefixes_count + decl.attributes_count + sc] = srcs[i];
+			tmp[prefixes_count + decl.attributes_count + sc + 1] = srcs[i];
 			++sc;
 		}
-		return sc + prefixes_count + decl.attributes_count;
+		return sc + prefixes_count + decl.attributes_count + 1;
 	};
 	
 	auto compile = [&](const char* src, ShaderType type){
