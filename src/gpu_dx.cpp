@@ -185,6 +185,11 @@ struct Texture {
 			ID3D11DepthStencilView* dsv_ro;
 		};
 	};
+	u32 rtv_face = 0;
+	u32 rtv_mip = 0;
+	u32 flags;
+	u32 w;
+	u32 h;
 	ID3D11ShaderResourceView* srv;
 	ID3D11SamplerState* sampler;
 	DXGI_FORMAT dxgi_format;
@@ -489,14 +494,24 @@ void copy(TextureHandle dst_handle, TextureHandle src_handle) {
 	d3d.device_ctx->CopyResource(dst.texture2D, src.texture2D);
 }
 
-void readTexture(TextureHandle handle, Span<u8> buf) {
+void readTexture(TextureHandle handle, u32 mip, Span<u8> buf) {
 	Texture& texture = d3d.textures[handle.value];
 
 	D3D11_MAPPED_SUBRESOURCE data;
-	d3d.device_ctx->Map(texture.texture2D, 0, D3D11_MAP_READ, 0, &data);
-	ASSERT(data.DepthPitch == buf.length());
-	memcpy(buf.begin(), data.pData, buf.length());
-	d3d.device_ctx->Unmap(texture.texture2D, 0);
+	
+	const u32 faces = (texture.flags & (u32)TextureFlags::IS_CUBE) ? 6 : 1;
+	const bool no_mips = texture.flags & (u32)TextureFlags::NO_MIPS;
+	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture.w, texture.h));
+	u8* ptr = buf.begin();
+	
+	for (u32 face = 0; face < faces; ++face) {
+		const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
+		d3d.device_ctx->Map(texture.texture2D, subres, D3D11_MAP_READ, 0, &data);
+		ASSERT(data.DepthPitch == buf.length() / faces);
+		memcpy(ptr, data.pData, data.DepthPitch);
+		ptr += data.DepthPitch;
+		d3d.device_ctx->Unmap(texture.texture2D, subres);
+	}
 }
 
 void queryTimestamp(QueryHandle query) {
@@ -745,6 +760,43 @@ void popDebugGroup()
 	d3d.annotation->EndEvent();
 }
 
+void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
+{
+	d3d.current_framebuffer.count = 0;
+	d3d.current_framebuffer.depth_stencil = nullptr;
+	Texture& t = d3d.textures[cube.value];
+	if (t.rtv && (t.rtv_face != face || t.rtv_mip) != mip) {
+		t.rtv->Release();
+		t.rtv = nullptr;
+	}
+	if(!t.rtv) {
+		D3D11_RENDER_TARGET_VIEW_DESC desc = {};
+		desc.Format = t.dxgi_format;
+		desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+		desc.Texture2DArray.MipSlice = mip;
+		desc.Texture2DArray.ArraySize = 1;
+		desc.Texture2DArray.FirstArraySlice = face;
+		d3d.device->CreateRenderTargetView((ID3D11Resource*)t.texture2D, &desc, &t.rtv);
+	}
+	ASSERT(d3d.current_framebuffer.count < (u32)lengthOf(d3d.current_framebuffer.render_targets));
+	d3d.current_framebuffer.render_targets[d3d.current_framebuffer.count] = t.rtv;
+
+	ID3D11ShaderResourceView* tmp[16] = {};
+	d3d.device_ctx->VSGetShaderResources(0, lengthOf(tmp), tmp);
+	for (ID3D11ShaderResourceView*& srv : tmp) {
+		if (t.srv == srv) {
+			const u32 idx = u32(&srv - tmp);
+			ID3D11ShaderResourceView* empty = nullptr;
+			d3d.device_ctx->VSSetShaderResources(idx, 1, &empty);
+			d3d.device_ctx->PSSetShaderResources(idx, 1, &empty);
+		}
+	}
+
+	++d3d.current_framebuffer.count;
+
+	d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
+}
+
 // TODO texture might get destroyed while framebuffer has rtv or dsv to it
 void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 	checkThread();
@@ -791,6 +843,21 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 		}
 	}
 	
+	ID3D11ShaderResourceView* tmp[16] = {};
+	d3d.device_ctx->VSGetShaderResources(0, lengthOf(tmp), tmp);
+	for (ID3D11ShaderResourceView*& srv : tmp) {
+		for (u32 i = 0; i < num; ++i) {
+			Texture& t = d3d.textures[attachments[i].value];
+			if (t.srv == srv) {
+				ID3D11ShaderResourceView* empty = nullptr;
+				const u32 idx = u32(&srv - tmp);
+				d3d.device_ctx->VSSetShaderResources(idx, 1, &empty);
+				d3d.device_ctx->PSSetShaderResources(idx, 1, &empty);
+				break;
+			}
+		}
+	}
+
 	d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
 }
 
@@ -1218,6 +1285,9 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	const DXGI_FORMAT internal_format = is_srgb ? li->srgb_format : li->format;
 	const u32 mip_count = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
 	Texture& texture = d3d.textures[handle.value];
+	texture.flags = flags;
+	texture.w = hdr.dwWidth;
+	texture.h = hdr.dwHeight;
 	
 	D3D11_SUBRESOURCE_DATA* srd = (D3D11_SUBRESOURCE_DATA*)_alloca(sizeof(D3D11_SUBRESOURCE_DATA) * mip_count * layers * (is_cubemap ? 6 : 1));
 	u32 srd_idx = 0;
@@ -1336,6 +1406,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	const bool no_mips = flags & (u32)TextureFlags::NO_MIPS;
 	const bool readback = flags & (u32)TextureFlags::READBACK;
 	const bool is_3d = flags & (u32)TextureFlags::IS_3D;
+	const bool is_cubemap = flags & (u32)TextureFlags::IS_CUBE;
 
 	switch (format) {
 		case TextureFormat::R8:
@@ -1357,7 +1428,10 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
 	Texture& texture = d3d.textures[handle.value];
+	texture.flags = flags;
 	texture.sampler = getSampler(flags);
+	texture.w = w;
+	texture.h = h;
 
 	D3D11_TEXTURE3D_DESC desc_3d = {};
 	D3D11_TEXTURE2D_DESC desc_2d = {};
@@ -1393,19 +1467,20 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	else {
 		fill_desc(desc_2d);
 		desc_2d.SampleDesc.Count = 1;
-		desc_2d.ArraySize = depth;
+		desc_2d.ArraySize = is_cubemap ? 6 : depth;
+		desc_2d.MiscFlags = is_cubemap ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
 		bytes_per_pixel = getSize(desc_2d.Format);
 	}
 
 	Array<Array<u8>> mips_data(*d3d.allocator);
 	mips_data.reserve(mip_count - 1);
 	if(data) {
-		D3D11_SUBRESOURCE_DATA* srd = (D3D11_SUBRESOURCE_DATA*)_alloca(sizeof(D3D11_SUBRESOURCE_DATA) * mip_count * depth);
+		D3D11_SUBRESOURCE_DATA* srd = (D3D11_SUBRESOURCE_DATA*)_alloca(sizeof(D3D11_SUBRESOURCE_DATA) * mip_count * (is_cubemap ? 6 : depth));
 		const u8* ptr = (u8*)data;
 		
 		// TODO some formats are transformed to different sized dxgi formats
 		u32 idx = 0;
-		for(u32 layer = 0; layer < depth; ++layer) {
+		for(u32 layer = 0; layer < (is_cubemap ? 6 : depth); ++layer) {
 			srd[idx].pSysMem = ptr;
 			srd[idx].SysMemPitch = w * bytes_per_pixel;
 			srd[idx].SysMemSlicePitch = h * srd[idx].SysMemPitch;
@@ -1476,6 +1551,12 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
 			srv_desc.Texture3D.MipLevels = mip_count;
 			d3d.device->CreateShaderResourceView(texture.texture3D, &srv_desc, &texture.srv);
+		}
+		else if (is_cubemap) {
+			srv_desc.Format = toViewFormat(desc_2d.Format);
+			srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+			srv_desc.TextureCube.MipLevels = mip_count;
+			d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 		}
 		else {
 			srv_desc.Format = toViewFormat(desc_2d.Format);
