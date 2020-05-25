@@ -470,10 +470,17 @@ void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) 
 	d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &view.srv);
 }
 
-void update(TextureHandle texture_handle, u32 mip, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {
+void generateMipmaps(TextureHandle handle){
+	Texture& t = d3d.textures[handle.value];
+	d3d.device_ctx->GenerateMips(t.srv);
+}
+
+void update(TextureHandle texture_handle, u32 mip, u32 face, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {
 	Texture& texture = d3d.textures[texture_handle.value];
 	ASSERT(texture.dxgi_format == getDXGIFormat(format));
-	const UINT subres = mip;
+	const bool no_mips = texture.flags & (u32)TextureFlags::NO_MIPS;
+	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture.w, texture.h));
+	const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
 	const u32 bytes_per_pixel = getSize(texture.dxgi_format);
 	const UINT row_pitch = w * bytes_per_pixel;
 	const UINT depth_pitch = row_pitch * h;
