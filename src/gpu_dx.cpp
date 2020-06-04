@@ -495,10 +495,34 @@ void update(TextureHandle texture_handle, u32 mip, u32 face, u32 x, u32 y, u32 w
 	d3d.device_ctx->UpdateSubresource(texture.texture2D, subres, &box, buf, row_pitch, depth_pitch);
 }
 
-void copy(TextureHandle dst_handle, TextureHandle src_handle) {
+void copy(TextureHandle dst_handle, TextureHandle src_handle, u32 dst_x, u32 dst_y) {
 	Texture& dst = d3d.textures[dst_handle.value];
 	Texture& src = d3d.textures[src_handle.value];
-	d3d.device_ctx->CopyResource(dst.texture2D, src.texture2D);
+	const bool no_mips = src.flags & (u32)TextureFlags::NO_MIPS;
+	const u32 src_mip_count = no_mips ? 1 : 1 + log2(maximum(src.w, src.h));
+	const u32 dst_mip_count = no_mips ? 1 : 1 + log2(maximum(dst.w, dst.h));
+
+	u32 mip = 0;
+	while ((src.w >> mip) != 0 || (src.h >> mip) != 0) {
+		const u32 w = maximum(src.w >> mip, 1);
+		const u32 h = maximum(src.h >> mip, 1);
+
+		if (src.flags & (u32)TextureFlags::IS_CUBE) {
+			for (u32 face = 0; face < 6; ++face) {
+				const UINT src_subres = D3D11CalcSubresource(mip, face, src_mip_count);
+				const UINT dst_subres = D3D11CalcSubresource(mip, face, dst_mip_count);
+				d3d.device_ctx->CopySubresourceRegion(dst.texture2D, dst_subres, dst_x, dst_y, 0, src.texture2D, src_subres, nullptr);
+			}
+		}
+		else {
+			const UINT src_subres = D3D11CalcSubresource(mip, 0, src_mip_count);
+			const UINT dst_subres = D3D11CalcSubresource(mip, 0, dst_mip_count);
+			d3d.device_ctx->CopySubresourceRegion(dst.texture2D, dst_subres, dst_x, dst_y, 0, src.texture2D, src_subres, nullptr);
+		}
+		++mip;
+		if (src.flags & (u32)TextureFlags::NO_MIPS) break;
+		if (dst.flags & (u32)TextureFlags::NO_MIPS) break;
+	}
 }
 
 void readTexture(TextureHandle handle, u32 mip, Span<u8> buf) {
