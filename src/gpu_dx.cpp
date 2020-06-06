@@ -1474,7 +1474,8 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.CPUAccessFlags = 0;
 		desc.Format = getDXGIFormat(format);
-		if(isDepthFormat(desc.Format)) {
+		const bool is_depth_format = isDepthFormat(desc.Format);
+		if (is_depth_format) {
 			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL;
 		}
 		else {
@@ -1485,7 +1486,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 			desc.BindFlags = 0;
 		}
-		desc.MiscFlags = 0;
+		desc.MiscFlags = readback || no_mips || is_depth_format ? 0 : D3D11_RESOURCE_MISC_GENERATE_MIPS;
 		texture.dxgi_format = desc.Format;
 	};
 
@@ -1499,7 +1500,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		fill_desc(desc_2d);
 		desc_2d.SampleDesc.Count = 1;
 		desc_2d.ArraySize = is_cubemap ? 6 : depth;
-		desc_2d.MiscFlags = is_cubemap ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
+		desc_2d.MiscFlags |= is_cubemap ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
 		bytes_per_pixel = getSize(desc_2d.Format);
 	}
 
