@@ -155,22 +155,16 @@ struct Program {
 	ID3D11VertexShader* vs = nullptr;
 	ID3D11PixelShader* ps = nullptr;
 	ID3D11GeometryShader* gs = nullptr;
+	ID3D11ComputeShader* cs = nullptr;
 	ID3D11InputLayout* il = nullptr;
 };
 
 struct Buffer {
 	ID3D11Buffer* buffer = nullptr;
 	ID3D11ShaderResourceView* srv = nullptr;
+	ID3D11UnorderedAccessView* uav = nullptr;
 	u8* mapped_ptr = nullptr;
 	bool is_constant_buffer = false;
-};
-
-struct BufferGroup {
-	BufferGroup(IAllocator& alloc) : data(alloc) {}
-	ID3D11Buffer* buffer = nullptr;
-	Array<u8> data;
-	size_t element_size = 0;
-	size_t elements_count = 0;
 };
 
 struct Texture {
@@ -240,11 +234,11 @@ static struct D3D {
 	u64 query_frequency = 1;
 
 	BufferHandle current_index_buffer = INVALID_BUFFER;
+	BufferHandle current_indirect_buffer = INVALID_BUFFER;
 	Mutex handle_mutex;
 	Pool<Query, 2048> queries;
 	Pool<Program, 256> programs;
 	Pool<Buffer, 8192> buffers;
-	Pool<BufferGroup, 64> buffer_groups;
 	Pool<Texture, 4096> textures;
 	Window windows[64];
 	Window* current_window = windows;
@@ -417,6 +411,7 @@ void destroy(ProgramHandle program) {
 	if (p.gs) p.gs->Release();
 	if (p.ps) p.ps->Release();
 	if (p.vs) p.vs->Release();
+	if (p.cs) p.cs->Release();
 	if (p.il) p.il->Release();
 
 	MutexGuard lock(d3d.handle_mutex);
@@ -573,7 +568,6 @@ void preinit(IAllocator& allocator)
 	try_load_renderdoc();
 	d3d.allocator = &allocator;
 	d3d.textures.init();
-	d3d.buffer_groups.init();
 	d3d.buffers.init();
 	d3d.programs.init();
 	d3d.queries.init();
@@ -586,7 +580,6 @@ void shutdown() {
 	ASSERT(d3d.programs.count == 0);
 	ASSERT(d3d.queries.count == 0);
 	ASSERT(d3d.textures.count == 0);
-	ASSERT(d3d.buffer_groups.count == 0);
 
 	for (const D3D::State& s : d3d.state_cache) {
 		s.bs->Release();
@@ -1098,21 +1091,32 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	Buffer& buffer = d3d.buffers[handle.value];
 	ASSERT(!buffer.buffer);
 	D3D11_BUFFER_DESC desc = {};
+	if(flags & (u32)BufferFlags::SHADER_BUFFER) {
+		size = ((size + 15) / 16) * 16;
+	}
+
 	desc.ByteWidth = (UINT)size;
 	buffer.is_constant_buffer = flags & (u32)BufferFlags::UNIFORM_BUFFER;
-	if(flags & (u32)BufferFlags::UNIFORM_BUFFER) {
+	if (flags & (u32)BufferFlags::UNIFORM_BUFFER) {
 		desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; 
 	}
 	else {
 		desc.BindFlags = D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER; 
-		if(flags & (u32)BufferFlags::SHADER_BUFFER) {
+		if (flags & (u32)BufferFlags::SHADER_BUFFER) {
 			desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
 			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+			if (flags & (u32)BufferFlags::COMPUTE_WRITE) {
+				desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+				desc.MiscFlags |= D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+			}
 		}
 	}
 
 	if (flags & (u32)BufferFlags::IMMUTABLE) {
 		desc.Usage = D3D11_USAGE_IMMUTABLE;
+	}
+	else if (flags & (u32)BufferFlags::COMPUTE_WRITE) {
+		desc.Usage = D3D11_USAGE_DEFAULT;
 	}
 	else {
 		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -1128,39 +1132,21 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
 		srv_desc.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
 		srv_desc.BufferEx.FirstElement = 0;
-		ASSERT(size % 16 == 0);
+		
 		srv_desc.BufferEx.NumElements = UINT(size / 4);
 
 		d3d.device->CreateShaderResourceView(buffer.buffer, &srv_desc, &buffer.srv);
-	}
-}
 
-
-void createBufferGroup(BufferGroupHandle handle, u32 flags, size_t element_size, size_t elements_count, const void* data)
-{
-	BufferGroup& buffer = d3d.buffer_groups[handle.value];
-	ASSERT(!buffer.buffer);
-	D3D11_BUFFER_DESC desc = {};
-	desc.ByteWidth = (UINT)element_size;
-	ASSERT(flags & (u32)BufferFlags::UNIFORM_BUFFER);
-	desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; 
-
-	if (flags & (u32)BufferFlags::IMMUTABLE) {
-		desc.Usage = D3D11_USAGE_IMMUTABLE;
+		if (flags & (u32)BufferFlags::COMPUTE_WRITE) {
+			D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+			uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+			uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+			uav_desc.Buffer.FirstElement = 0;
+			uav_desc.Buffer.NumElements = UINT(size / 16);
+			uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+			d3d.device->CreateUnorderedAccessView(buffer.buffer, &uav_desc, &buffer.uav);
+		}
 	}
-	else {
-		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-		desc.Usage = D3D11_USAGE_DYNAMIC;
-	}
-	D3D11_SUBRESOURCE_DATA initial_data = {};
-	buffer.element_size = element_size;
-	buffer.elements_count = elements_count;
-	buffer.data.resize(u32(elements_count * element_size));
-	if (data) {
-		memcpy(buffer.data.begin(), data, buffer.data.byte_size());
-	}
-	initial_data.pSysMem = nullptr;
-	d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer.buffer);
 }
 
 ProgramHandle allocProgramHandle()
@@ -1188,19 +1174,6 @@ BufferHandle allocBufferHandle()
 	const int id = d3d.buffers.alloc();
 	Buffer& t = d3d.buffers[id];
 	t = {};
-	return { (u32)id };
-}
-
-BufferGroupHandle allocBufferGroupHandle()
-{
-	MutexGuard lock(d3d.handle_mutex);
-
-	if(d3d.buffer_groups.isFull()) {
-		logError("Renderer") << "Not enough free buffer group slots.";
-		return INVALID_BUFFER_GROUP;
-	}
-	const int id = d3d.buffer_groups.alloc(*d3d.allocator);
-	BufferGroup& t = d3d.buffer_groups[id];
 	return { (u32)id };
 }
 
@@ -1754,12 +1727,14 @@ void useProgram(ProgramHandle handle)
 		d3d.device_ctx->VSSetShader(program.vs, nullptr, 0);
 		d3d.device_ctx->PSSetShader(program.ps, nullptr, 0);
 		d3d.device_ctx->GSSetShader(program.gs, nullptr, 0);
+		d3d.device_ctx->CSSetShader(program.cs, nullptr, 0);
 		d3d.device_ctx->IASetInputLayout(program.il);
 	}
 	else {
 		d3d.device_ctx->VSSetShader(nullptr, nullptr, 0);
 		d3d.device_ctx->PSSetShader(nullptr, nullptr, 0);
 		d3d.device_ctx->GSSetShader(nullptr, nullptr, 0);
+		d3d.device_ctx->CSSetShader(nullptr, nullptr, 0);
 	}
 }
 
@@ -1830,57 +1805,74 @@ void destroy(BufferHandle buffer) {
 	Buffer& t = d3d.buffers[buffer.value];
 	t.buffer->Release();
 	if (t.srv) t.srv->Release();
+	if (t.uav) t.uav->Release();
 
 	MutexGuard lock(d3d.handle_mutex);
 	d3d.buffers.dealloc(buffer.value);
 }
 
-void destroy(BufferGroupHandle buffer) {
-	checkThread();
-	
-	BufferGroup& t = d3d.buffer_groups[buffer.value];
-	t.buffer->Release();
-
-	MutexGuard lock(d3d.handle_mutex);
-	d3d.buffers.dealloc(buffer.value);
-}
-
-void bindShaderBuffer(BufferHandle buffer, u32 binding_point)
+void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags)
 {
 	if(buffer.isValid()) {
 		Buffer& b = d3d.buffers[buffer.value];
 		ASSERT(b.srv);
-		d3d.device_ctx->VSSetShaderResources(binding_point, 1, &b.srv);
-		d3d.device_ctx->PSSetShaderResources(binding_point, 1, &b.srv);
+		if (b.uav) {
+			if (flags & (u32)BindShaderBufferFlags::OUTPUT) {
+				d3d.device_ctx->CSSetUnorderedAccessViews(binding_point, 1, &b.uav, nullptr);
+			}
+			else {
+				d3d.device_ctx->CSSetShaderResources(binding_point, 1, &b.srv);
+			}
+		}
+		else {
+			d3d.device_ctx->VSSetShaderResources(binding_point, 1, &b.srv);
+			d3d.device_ctx->PSSetShaderResources(binding_point, 1, &b.srv);
+		}
 	}
 	else {
 		ID3D11ShaderResourceView* srv = nullptr;
+		ID3D11UnorderedAccessView* uav = nullptr;
 		d3d.device_ctx->VSSetShaderResources(binding_point, 1, &srv);
 		d3d.device_ctx->PSSetShaderResources(binding_point, 1, &srv);
-	
+		d3d.device_ctx->CSSetShaderResources(binding_point, 1, &srv);
+		d3d.device_ctx->CSSetUnorderedAccessViews(binding_point, 1, &uav, nullptr);
 	}
 }
 
-void bindUniformBuffer(u32 ub_index, BufferGroupHandle group, size_t element_index) {
-	BufferGroup& g = d3d.buffer_groups[group.value];
-	
-	D3D11_MAPPED_SUBRESOURCE msr;
-	d3d.device_ctx->Map(g.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
-	memcpy((u8*)msr.pData, g.data.begin() + g.element_size * element_index, g.element_size);
-	d3d.device_ctx->Unmap(g.buffer, 0);
-
-	d3d.device_ctx->VSSetConstantBuffers(ub_index, 1, &g.buffer);
-	d3d.device_ctx->PSSetConstantBuffers(ub_index, 1, &g.buffer);
+void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
+	ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
+	ASSERT(offset % 16 == 0);
+	const UINT first = (UINT)offset / 16;
+	const UINT num = ((UINT)size + 255) / 256 * 16;
+	d3d.device_ctx->VSSetConstantBuffers1(index, 1, &b, &first, &num);
+	d3d.device_ctx->PSSetConstantBuffers1(index, 1, &b, &first, &num);
+	d3d.device_ctx->CSSetConstantBuffers1(index, 1, &b, &first, &num);
 }
 
-void bindUniformBuffer(u32 index, BufferHandle buffer, size_t size) {
-	ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
-	d3d.device_ctx->VSSetConstantBuffers(index, 1, &b);
-	d3d.device_ctx->PSSetConstantBuffers(index, 1, &b);
+void drawIndirect(DataType index_type) {
+	DXGI_FORMAT dxgi_index_type;
+	switch(index_type) {
+		case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; break;
+		case DataType::U16: dxgi_index_type = DXGI_FORMAT_R16_UINT; break;
+	}
+
+	ID3D11Buffer* index_b = d3d.buffers[d3d.current_index_buffer.value].buffer;
+	ID3D11Buffer* indirect_b = d3d.buffers[d3d.current_indirect_buffer.value].buffer;
+	d3d.device_ctx->IASetIndexBuffer(index_b, dxgi_index_type, 0);
+	d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	d3d.device_ctx->DrawIndexedInstancedIndirect(indirect_b, 0);
+}
+
+void bindIndirectBuffer(BufferHandle handle) {
+	d3d.current_indirect_buffer = handle;
 }
 
 void bindIndexBuffer(BufferHandle handle) {
 	d3d.current_index_buffer = handle;
+}
+
+void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
+	d3d.device_ctx->Dispatch(num_groups_x, num_groups_y, num_groups_z);
 }
 
 void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride_offset) {
@@ -1911,8 +1903,10 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	}
 	d3d.device_ctx->VSSetShaderResources(offset, count, views);
 	d3d.device_ctx->PSSetShaderResources(offset, count, views);
+	d3d.device_ctx->CSSetShaderResources(offset, count, views);
 	d3d.device_ctx->PSSetSamplers(offset, count, samplers);
 	d3d.device_ctx->VSSetSamplers(offset, count, samplers);
+	d3d.device_ctx->CSSetSamplers(offset, count, samplers);
 }
 
 void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
@@ -1952,30 +1946,32 @@ void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType 
 	d3d.device_ctx->DrawIndexed(count, offset >> offset_shift, 0);
 }
 
-void updatePart(BufferHandle buffer, const void* data, size_t offset, size_t size) {
-	checkThread();
-	const Buffer& b = d3d.buffers[buffer.value];
-	ASSERT(!b.mapped_ptr);
-	D3D11_MAPPED_SUBRESOURCE msr;
-	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
-	memcpy((u8*)msr.pData, data, size);
-	d3d.device_ctx->Unmap(b.buffer, 0);
+void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size) {
+	const Buffer& bdst = d3d.buffers[dst.value];
+	const Buffer& bsrc = d3d.buffers[src.value];
+	ASSERT(!bdst.mapped_ptr);
+	ASSERT(!bsrc.mapped_ptr);
+	D3D11_BOX src_box = {};
+	src_box.right = size;
+	src_box.bottom = 1;
+	src_box.back = 1;
+	d3d.device_ctx->CopySubresourceRegion(bdst.buffer, 0, dst_offset, 0, 0, bsrc.buffer, 0, &src_box);
 }
 
 void update(BufferHandle buffer, const void* data, size_t size) {
 	checkThread();
+	
 	const Buffer& b = d3d.buffers[buffer.value];
 	ASSERT(!b.mapped_ptr);
-	D3D11_MAPPED_SUBRESOURCE msr;
-	d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
-	memcpy((u8*)msr.pData, data, size);
-	d3d.device_ctx->Unmap(b.buffer, 0);
-}
-
-void update(BufferGroupHandle handle, const void* data, size_t element_index) {
-	checkThread();
-	const BufferGroup& b = d3d.buffer_groups[handle.value];
-	memcpy(b.data.begin() + b.element_size * element_index, data, b.element_size);
+	if (b.uav) {
+		d3d.device_ctx->UpdateSubresource1(b.buffer, 0, nullptr, data, (UINT)size, (UINT)size, D3D11_COPY_DISCARD);
+	}
+	else {
+		D3D11_MAPPED_SUBRESOURCE msr;
+		d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
+		memcpy((u8*)msr.pData, data, size);
+		d3d.device_ctx->Unmap(b.buffer, 0);
+	}
 }
 
 static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
@@ -2123,6 +2119,7 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 	glslang::TProgram p;
 	EShLanguage lang = EShLangVertex;
 	switch(type) {
+		case ShaderType::COMPUTE: lang = EShLangCompute; break;
 		case ShaderType::FRAGMENT: lang = EShLangFragment; break;
 		case ShaderType::VERTEX: lang = EShLangVertex; break;
 		case ShaderType::GEOMETRY: lang = EShLangGeometry; break;
@@ -2189,6 +2186,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 	const char* tmp[128];
 	auto filter_srcs = [&](ShaderType type) -> u32 {
 		switch (type) {
+			case ShaderType::COMPUTE: tmp[0] = "#define LUMIX_COMPUTE_SHADER\n"; break;
 			case ShaderType::GEOMETRY: tmp[0] = "#define LUMIX_GEOMETRY_SHADER\n"; break;
 			case ShaderType::FRAGMENT: tmp[0] = "#define LUMIX_FRAGMENT_SHADER\n"; break;
 			case ShaderType::VERTEX: tmp[0] = "#define LUMIX_VERTEX_SHADER\n"; break;
@@ -2207,7 +2205,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 			tmp[prefixes_count + decl.attributes_count + sc + 1] = srcs[i];
 			++sc;
 		}
-		return sc + prefixes_count + decl.attributes_count + 1;
+		return sc ? sc + prefixes_count + decl.attributes_count + 1 : 0;
 	};
 	
 	auto compile = [&](const char* src, ShaderType type){
@@ -2221,7 +2219,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 			, NULL
 			, NULL
 			, "main"
-			, type == ShaderType::VERTEX ? "vs_5_0" : "ps_5_0"
+			, type == ShaderType::VERTEX ? "vs_5_0" : (type == ShaderType::COMPUTE ? "cs_5_0" : "ps_5_0")
 			, D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_DEBUG
 			, 0
 			, &output
@@ -2250,6 +2248,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 				break;
 			case ShaderType::FRAGMENT: hr = d3d.device->CreatePixelShader(ptr, len, nullptr, &program.ps); break;
 			case ShaderType::GEOMETRY: hr = d3d.device->CreateGeometryShader(ptr, len, nullptr, &program.gs); break;
+			case ShaderType::COMPUTE: hr = d3d.device->CreateComputeShader(ptr, len, nullptr, &program.cs); break;
 			default: ASSERT(false); break;
 		}
 		return SUCCEEDED(hr);
@@ -2257,6 +2256,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 
 	auto compile_stage = [&](ShaderType type){
 		const u32 c = filter_srcs(type);
+		if (c == 0) return true;
 		if (c > (u32)prefixes_count + decl.attributes_count) {
 			std::string hlsl;
 			if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl))) {
@@ -2269,6 +2269,8 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 
 	bool compiled = compile_stage(ShaderType::VERTEX);
 	compiled = compiled && compile_stage(ShaderType::FRAGMENT);
+	compiled = compiled && compile_stage(ShaderType::COMPUTE);
+	compiled = compiled && compile_stage(ShaderType::GEOMETRY);
 	if(!compiled) return false;
 
 	D3D11_INPUT_ELEMENT_DESC descs[16];
@@ -2295,6 +2297,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 		if(program.vs) program.vs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
 		if(program.ps) program.ps->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
 		if(program.gs) program.gs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
+		if(program.cs) program.cs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
 	}
 
 	return true;    
