@@ -67,6 +67,7 @@ static u32 getSize(DXGI_FORMAT format) {
 		case DXGI_FORMAT_R8G8B8A8_UNORM: return 4;
 		case DXGI_FORMAT_R16G16B16A16_UNORM: return 8;
 		case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
+		case DXGI_FORMAT_R32G32_FLOAT: return 8;
 		case DXGI_FORMAT_R32G32B32_FLOAT: return 12;
 		case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16;
 		case DXGI_FORMAT_R16_UNORM: return 2;
@@ -102,6 +103,7 @@ static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 		case TextureFormat::R16: return DXGI_FORMAT_R16_UNORM;
 		case TextureFormat::R16F: return DXGI_FORMAT_R16_FLOAT;
 		case TextureFormat::R32F: return DXGI_FORMAT_R32_FLOAT;
+		case TextureFormat::RG32F: return DXGI_FORMAT_R32G32_FLOAT;
 	}
 	ASSERT(false);
 	return DXGI_FORMAT_R8G8B8A8_UINT;
@@ -179,6 +181,7 @@ struct Texture {
 			ID3D11DepthStencilView* dsv_ro;
 		};
 	};
+	ID3D11UnorderedAccessView* uav = nullptr;
 	u32 rtv_face = 0;
 	u32 rtv_mip = 0;
 	u32 flags;
@@ -187,6 +190,7 @@ struct Texture {
 	ID3D11ShaderResourceView* srv;
 	ID3D11SamplerState* sampler;
 	DXGI_FORMAT dxgi_format;
+	u32 bound_to_output = 0xffFFffFF;
 };
 
 struct Query {
@@ -227,6 +231,7 @@ static struct D3D {
 	RENDERDOC_API_1_0_2* rdoc_api;
 	IAllocator* allocator = nullptr;
 	ID3D11DeviceContext1* device_ctx = nullptr;
+	TextureHandle bound_image_textures[16];
 	ID3D11Device* device = nullptr;
 	ID3DUserDefinedAnnotation* annotation = nullptr;
 	ID3D11Query* disjoint_query = nullptr;
@@ -431,6 +436,7 @@ void destroy(TextureHandle texture) {
 		if (t.rtv) t.rtv->Release();
 	}
 
+	if (t.uav) t.uav->Release();
 	if (t.texture2D) t.texture2D->Release();
 
 	MutexGuard lock(d3d.handle_mutex);
@@ -1411,12 +1417,14 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	const bool readback = flags & (u32)TextureFlags::READBACK;
 	const bool is_3d = flags & (u32)TextureFlags::IS_3D;
 	const bool is_cubemap = flags & (u32)TextureFlags::IS_CUBE;
+	const bool compute_write = flags & (u32)TextureFlags::COMPUTE_WRITE;
 
 	switch (format) {
 		case TextureFormat::R8:
 		case TextureFormat::RGBA8:
 		case TextureFormat::RGBA32F:
 		case TextureFormat::R32F:
+		case TextureFormat::RG32F:
 		case TextureFormat::SRGB:
 		case TextureFormat::SRGBA: break;
 		
@@ -1453,6 +1461,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		}
 		else {
 			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		}
+		if (compute_write) {
+			desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
 		}
 		if (readback) {
 			desc.Usage = D3D11_USAGE_STAGING;
@@ -1547,6 +1558,14 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 	if(debug_name && debug_name[0]) {
 		texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
+	}
+
+	if (compute_write) {
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+		uav_desc.Format = texture.dxgi_format;
+		uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+		uav_desc.Texture2D.MipSlice = 0;
+		d3d.device->CreateUnorderedAccessView(texture.texture2D, &uav_desc, &texture.uav);
 	}
 
 	if (!readback) {
@@ -1774,7 +1793,6 @@ void drawArrays(u32 offset, u32 count, PrimitiveType type)
 	d3d.device_ctx->Draw(count, offset);
 }
 
-bool isHomogenousDepth() { return false; }
 bool isOriginBottomLeft() { return false; }
 
 TextureInfo getTextureInfo(const void* data)
@@ -1887,6 +1905,21 @@ void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u
 	}
 }
 
+void bindImageTexture(TextureHandle handle, u32 unit) {
+	
+	if (handle.isValid()) {
+		Texture& texture = d3d.textures[handle.value];
+		texture.bound_to_output = unit;
+		d3d.device_ctx->CSSetUnorderedAccessViews(unit, 1, &texture.uav, nullptr);
+		d3d.bound_image_textures[unit] = handle;
+	}
+	else {
+		ID3D11UnorderedAccessView* uav = nullptr;
+		d3d.device_ctx->CSSetUnorderedAccessViews(unit, 1, &uav, nullptr);
+		d3d.bound_image_textures[unit] = INVALID_TEXTURE;
+	}
+}
+
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	ID3D11ShaderResourceView* views[16];
 	ID3D11SamplerState* samplers[16];
@@ -1895,6 +1928,11 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 			const Texture& texture = d3d.textures[handles[i].value];
 			views[i] = texture.srv;
 			samplers[i] = texture.sampler;
+			if (texture.bound_to_output != 0xffFFffFF && d3d.bound_image_textures[texture.bound_to_output].value == handles[i].value) {
+				ID3D11UnorderedAccessView* uav = nullptr;
+				d3d.device_ctx->CSSetUnorderedAccessViews(texture.bound_to_output, 1, &uav, nullptr);
+			
+			}
 		}
 		else {
 			views[i] = nullptr;
@@ -2154,6 +2192,11 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 		spirv_cross::CompilerHLSL::Options options;
 		options.shader_model = 50;
 		hlsl.set_hlsl_options(options);
+		const spirv_cross::VariableID num_workgroups_builtin_id = hlsl.remap_num_workgroups_builtin();
+		if (num_workgroups_builtin_id != spirv_cross::VariableID(0)) {
+			logError("Renderer") << shader_name << ": there's no hlsl equivalent to gl_NumWorkGroups, use user-provided uniforms instead.";
+			return false;
+		}
 		out = hlsl.compile();
 		return true;
 	}
