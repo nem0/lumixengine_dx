@@ -345,6 +345,7 @@ static LoadInfo* getDXT10LoadInfo(const Header& hdr, const DXT10Header& dxt10_hd
 
 static void try_load_renderdoc() {
 	HMODULE lib = LoadLibrary("renderdoc.dll");
+	if (!lib) lib = LoadLibrary("C:\\Program Files\\RenderDoc\\renderdoc.dll");
 	if (!lib) return;
 	pRENDERDOC_GetAPI RENDERDOC_GetAPI = (pRENDERDOC_GetAPI)GetProcAddress(lib, "RENDERDOC_GetAPI");
 	if (RENDERDOC_GetAPI) {
@@ -569,9 +570,9 @@ bool isQueryReady(QueryHandle query) {
 	return res == S_OK;
 }
 
-void preinit(IAllocator& allocator)
+void preinit(IAllocator& allocator, bool load_renderdoc)
 {
-	try_load_renderdoc();
+	if (load_renderdoc) try_load_renderdoc();
 	d3d.allocator = &allocator;
 	d3d.textures.init();
 	d3d.buffers.init();
