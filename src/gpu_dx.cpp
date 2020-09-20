@@ -1563,9 +1563,18 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 	if (compute_write) {
 		D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
-		uav_desc.Format = texture.dxgi_format;
-		uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-		uav_desc.Texture2D.MipSlice = 0;
+		if (is_3d) {
+			uav_desc.Format = texture.dxgi_format;
+			uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D;
+			uav_desc.Texture3D.MipSlice = 0;
+			uav_desc.Texture3D.WSize = -1;
+			uav_desc.Texture3D.FirstWSlice = 0;
+		}
+		else {
+			uav_desc.Format = texture.dxgi_format;
+			uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+			uav_desc.Texture2D.MipSlice = 0;
+		}
 		d3d.device->CreateUnorderedAccessView(texture.texture2D, &uav_desc, &texture.uav);
 	}
 
@@ -1675,8 +1684,13 @@ void setState(u64 state)
 				D3D11_BLEND_DEST_COLOR,
 				D3D11_BLEND_INV_DEST_COLOR,
 				D3D11_BLEND_DEST_ALPHA,
-				D3D11_BLEND_INV_DEST_ALPHA
+				D3D11_BLEND_INV_DEST_ALPHA,
+				D3D11_BLEND_SRC1_COLOR,
+				D3D11_BLEND_INV_SRC1_COLOR,
+				D3D11_BLEND_SRC1_ALPHA,
+				D3D11_BLEND_INV_SRC1_ALPHA,
 			};
+			ASSERT((u32)factor < lengthOf(table));
 			return table[(int)factor];
 		};
 
