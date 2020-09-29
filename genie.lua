@@ -13,7 +13,7 @@ project "renderer"
 	excludes { "../../src/renderer/gpu/gpu.cpp" }
 
 	if _OPTIONS["dx12"] then
-		includedirs {"../../plugins/dx11/external/pix/Include/WinPixEventRuntime"}
+		includedirs {"../../plugins/dx11/external/pix/Include/WinPixEventRuntime", "../../plugins/dx11/external/include/dx" }
 		libdirs { "../../plugins/dx11/external/pix/bin/x64" }
 		files { "../../plugins/dx11/external/pix/bin/x64/WinPixEventRuntime.dll" }
 		configuration "**.dll"

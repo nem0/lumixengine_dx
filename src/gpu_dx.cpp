@@ -356,6 +356,12 @@ static void try_load_renderdoc() {
 	//FreeLibrary(lib);
 }
 
+void launchRenderDoc() {
+	if (d3d.rdoc_api) {
+		d3d.rdoc_api->LaunchReplayUI(1, "");
+	}
+}
+
 static bool isDepthFormat(DXGI_FORMAT format) {
 	switch(format) {
 		case DXGI_FORMAT_R24G8_TYPELESS: return true;
@@ -1014,7 +1020,7 @@ void setCurrentWindow(void* window_handle)
 	ASSERT(false);
 }
 
-void swapBuffers()
+u32 swapBuffers()
 {
 	if(d3d.disjoint_waiting) {
 		D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint_query_data;
@@ -1091,7 +1097,10 @@ void swapBuffers()
 		}
 	}
 	d3d.current_framebuffer = d3d.windows[0].framebuffer;
+	return 0;
 }
+
+void waitFrame(u32 frame) {}
 
 void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 {
@@ -1635,7 +1644,7 @@ void setState(u64 state)
 		if(depthStencilDesc.StencilEnable) {
 
 			depthStencilDesc.StencilReadMask = u8(state >> 42);
-			depthStencilDesc.StencilWriteMask = u8(state >> 42);
+			depthStencilDesc.StencilWriteMask = u8(state >> 22);
 			D3D11_COMPARISON_FUNC dx_func;
 			switch(func) {
 				case StencilFuncs::ALWAYS: dx_func = D3D11_COMPARISON_ALWAYS; break;
