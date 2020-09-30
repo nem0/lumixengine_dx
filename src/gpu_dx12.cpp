@@ -33,7 +33,6 @@
 #pragma comment(lib, "spirv-cross-cpp.lib")
 #pragma comment(lib, "spirv-cross-glsl.lib")
 #pragma comment(lib, "spirv-cross-hlsl.lib")
-#pragma comment(lib, "GFSDK_Aftermath_Lib.x64.lib")
 
 #ifdef LUMIX_DEBUG
 	#define USE_PIX
