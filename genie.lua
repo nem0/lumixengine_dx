@@ -29,10 +29,6 @@ project "renderer"
 
 if build_studio then
 	project "studio"
-		if _OPTIONS["dx12"] then
-			libdirs { "../../plugins/dx11/external/pix/bin/x64" }
-			libdirs { "../../plugins/dx11/external/NVIDIA_Nsight_Aftermath_SDK/lib/x64" }
-		end
 		for conf,conf_dir in pairs({Debug="release", RelWithDebInfo="release"}) do
 			for platform,target_platform in pairs({win="windows", linux="linux", }) do
 				configuration { "x64", conf, target_platform }

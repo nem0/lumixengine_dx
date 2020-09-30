@@ -145,44 +145,6 @@ static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 	return DXGI_FORMAT_R8G8B8A8_UINT;
 }
 
-template <typename T, u32 MAX_COUNT> struct Pool {
-	void init() {
-		values = (T*)mem;
-		for (int i = 0; i < MAX_COUNT; ++i) {
-			new (&values[i]) int(i + 1);
-		}
-		new (&values[MAX_COUNT - 1]) int(-1);
-		first_free = 0;
-	}
-
-	template <typename... Args> int alloc(Args&&... args) {
-		if (first_free == -1) return -1;
-
-		++count;
-		const int id = first_free;
-		first_free = *((int*)&values[id]);
-		new (&values[id]) T(args...);
-		return id;
-	}
-
-	void dealloc(u32 idx) {
-		--count;
-		values[idx].~T();
-		*((int*)&values[idx]) = first_free;
-		first_free = idx;
-	}
-
-	alignas(T) u8 mem[sizeof(T) * MAX_COUNT];
-	T* values;
-	int first_free;
-	u32 count = 0;
-
-	T& operator[](int idx) { return values[idx]; }
-	bool isFull() const { return first_free == -1; }
-
-	static constexpr u32 CAPACITY = MAX_COUNT;
-};
-
 struct Program {
 	ID3DBlob* vs = nullptr;
 	ID3DBlob* ps = nullptr;
