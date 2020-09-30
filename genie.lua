@@ -13,12 +13,9 @@ project "renderer"
 	excludes { "../../src/renderer/gpu/gpu.cpp" }
 
 	if _OPTIONS["dx12"] then
-		includedirs {"../../plugins/dx11/external/pix/Include/WinPixEventRuntime", "../../plugins/dx11/external/include/dx" }
-		libdirs { "../../plugins/dx11/external/pix/bin/x64" }
-		files { "../../plugins/dx11/external/pix/bin/x64/WinPixEventRuntime.dll" }
-		configuration "**.dll"
-			buildaction "Copy" -- todo - this does not work
-		configuration {}
+		includedirs {"external/pix/Include/WinPixEventRuntime", "../../plugins/dx11/external/include/dx" }
+		files { "external/pix/bin/x64/WinPixEventRuntime.dll" }
+		copy { "external/pix/bin/x64/WinPixEventRuntime.dll" }
 		excludes { "src/gpu_dx.cpp" }
 		solution "LumixEngine"
 			defines { "LUMIX_DX12" }
@@ -29,11 +26,6 @@ project "renderer"
 
 if build_studio then
 	project "studio"
-		for conf,conf_dir in pairs({Debug="release", RelWithDebInfo="release"}) do
-			for platform,target_platform in pairs({win="windows", linux="linux", }) do
-				configuration { "x64", conf, target_platform }
-				libdirs {"../dx11/external/lib/" .. platform .. "64" .. "_" .. binary_api_dir .. "/" .. conf_dir}
-			end
-			configuration {}
-		end
+		libdirs { "external/lib/win64" .. "_" .. binary_api_dir .. "/release"}
+		libdirs { "external/pix/bin/x64" }
 end
