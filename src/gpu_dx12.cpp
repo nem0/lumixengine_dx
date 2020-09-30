@@ -33,6 +33,7 @@
 #pragma comment(lib, "spirv-cross-cpp.lib")
 #pragma comment(lib, "spirv-cross-glsl.lib")
 #pragma comment(lib, "spirv-cross-hlsl.lib")
+#pragma comment(lib, "GFSDK_Aftermath_Lib.x64.lib")
 
 #ifdef LUMIX_DEBUG
 	#define USE_PIX
@@ -194,12 +195,12 @@ struct Program {
 struct Buffer {
 	D3D12_RESOURCE_STATES setState(ID3D12GraphicsCommandList* cmd_list, D3D12_RESOURCE_STATES new_state) {
 		D3D12_RESOURCE_STATES old_state = state;
-		switchState(cmd_list, buffer, state, new_state);
+		switchState(cmd_list, resource, state, new_state);
 		state = new_state;
 		return old_state;
 	}
 
-	ID3D12Resource* buffer = nullptr;
+	ID3D12Resource* resource = nullptr;
 	u8* mapped_ptr = nullptr;
 	size_t size = 0;
 	D3D12_RESOURCE_STATES state;
@@ -294,7 +295,7 @@ struct HeapAllocator {
 
 	bool init(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 num_descriptors, u32 num_backing_descriptors) {
 		free_list.reserve(num_backing_descriptors);
-		for (u32 i = 0; i < num_backing_descriptors; ++i) {
+		for (u32 i = 2; i < num_backing_descriptors; ++i) {
 			free_list.push(i);
 		}
 
@@ -322,7 +323,24 @@ struct HeapAllocator {
 			desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 			desc.NodeMask = 1;
 			if (device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&backing_heap)) != S_OK) return false;
+
+			// null texture srv
+			D3D12_CPU_DESCRIPTOR_HANDLE cpu = backing_heap->GetCPUDescriptorHandleForHeapStart();
+			D3D12_SHADER_RESOURCE_VIEW_DESC tsrv_desc = {};
+			tsrv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			tsrv_desc.Format = DXGI_FORMAT_R8G8_B8G8_UNORM;
+			tsrv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			device->CreateShaderResourceView(nullptr, &tsrv_desc, cpu);
+
+			// null buffer srv
+			cpu.ptr += increment;
+			D3D12_SHADER_RESOURCE_VIEW_DESC bsrv_desc = {};
+			bsrv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+			bsrv_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+			bsrv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			device->CreateShaderResourceView(nullptr, &bsrv_desc, cpu);
 		}
+
 		return true;
 	}
 
@@ -412,8 +430,8 @@ struct Frame {
 	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12Fence* fence, Ref<u64> fence_value) {
 		HRESULT hr = cmd_list->Close();
 		ASSERT(hr == S_OK);
-		// hr = cmd_queue->Wait(fence, fence_value);
-		// ASSERT(hr == S_OK);
+		hr = cmd_queue->Wait(fence, fence_value);
+		ASSERT(hr == S_OK);
 		cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmd_list);
 		++fence_value;
 		hr = cmd_queue->Signal(fence, fence_value);
@@ -499,6 +517,7 @@ static struct D3D {
 	u64 fence_value = 0;
 	ID3D12CommandQueue* cmd_queue = nullptr;
 	u64 query_frequency = 1;
+	BufferHandle current_indirect_buffer = INVALID_BUFFER;
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	ProgramHandle current_program = INVALID_PROGRAM;
 	SRV current_srvs[10];
@@ -506,9 +525,6 @@ static struct D3D {
 	u64 current_state = 0;
 	HashMap<u32, ID3D12PipelineState*> pipelines;
 	Mutex handle_mutex;
-	Pool<Program, 256> programs;
-	Pool<Buffer, 8192> buffers;
-	Pool<Texture, 4096> textures;
 	Window windows[64];
 	Window* current_window = windows;
 	FrameBuffer current_framebuffer;
@@ -529,7 +545,8 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const S
 	u32 flags[16];
 	for (u32 i = 0; i < count; ++i) {
 		if (!srvs[i].is_buffer && srvs[i].texture.isValid()) {
-			flags[i] = d3d.textures[srvs[i].texture.value].flags;
+			ASSERT(srvs[i].texture.value);
+			flags[i] = srvs[i].texture.value->flags;
 		} else {
 			flags[i] = 0;
 		}
@@ -556,7 +573,8 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const S
 	for (u32 i = 0; i < count; ++i) {
 		if (!srvs[i].is_buffer && srvs[i].texture.isValid()) {
 			D3D12_SAMPLER_DESC desc = {};
-			const Texture& t = d3d.textures[srvs[i].texture.value];
+			ASSERT(srvs[i].texture.value);
+			const Texture& t = *srvs[i].texture.value;
 			desc.AddressU = (t.flags & (u32)TextureFlags::CLAMP_U) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			desc.AddressV = (t.flags & (u32)TextureFlags::CLAMP_V) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			desc.AddressW = (t.flags & (u32)TextureFlags::CLAMP_W) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -582,13 +600,20 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(HeapAllocator& heap, const SRV* srvs
 	for (u32 i = 0; i < count; ++i) {
 		if (srvs[i].is_buffer) {
 			if (srvs[i].buffer.isValid()) {
-				const Buffer& b = d3d.buffers[srvs[i].buffer.value];
-				heap.copy(d3d.device, b.heap_id);
+				const Buffer* b = srvs[i].buffer.value;
+				if (b)
+					heap.copy(d3d.device, b->heap_id);
+				else
+					heap.copy(d3d.device, 1);
 			}
 		} else {
 			if (srvs[i].texture.isValid()) {
-				const Texture& t = d3d.textures[srvs[i].texture.value];
-				heap.copy(d3d.device, t.heap_id);
+				ASSERT(srvs[i].texture.value);
+				const Texture& t = *srvs[i].texture.value;
+				if (t.resource)
+					heap.copy(d3d.device, t.heap_id);
+				else
+					heap.copy(d3d.device, 0);
 			}
 		}
 	}
@@ -604,6 +629,8 @@ static D3D12_CPU_DESCRIPTOR_HANDLE allocDSV(HeapAllocator& heap, const Texture& 
 	D3D12_CPU_DESCRIPTOR_HANDLE res = cpu;
 	++heap.count;
 
+	ASSERT(texture.resource);
+	ASSERT(texture.resource);
 	if (texture.resource) {
 		D3D12_DEPTH_STENCIL_VIEW_DESC desc = {};
 		desc.Format = toDSViewFormat(texture.dxgi_format);
@@ -623,6 +650,7 @@ static D3D12_CPU_DESCRIPTOR_HANDLE allocRTV(HeapAllocator& heap, ID3D12Resource*
 	D3D12_CPU_DESCRIPTOR_HANDLE res = cpu;
 	++heap.count;
 
+	ASSERT(resource);
 	if (resource) {
 		d3d.device->CreateRenderTargetView(resource, nullptr, cpu);
 	}
@@ -749,23 +777,23 @@ void checkThread() {
 void destroy(ProgramHandle program) {
 	checkThread();
 
-	Program& p = d3d.programs[program.value];
+	ASSERT(program.value);
+	Program& p = *program.value;
 	if (p.gs) d3d.frame->to_release.push(p.gs);
 	if (p.ps) d3d.frame->to_release.push(p.ps);
 	if (p.vs) d3d.frame->to_release.push(p.vs);
 	if (p.cs) d3d.frame->to_release.push(p.cs);
 
-	MutexGuard lock(d3d.handle_mutex);
-	d3d.programs.dealloc(program.value);
+	d3d.static_allocator.deallocate(program.value);
 }
 
 void destroy(TextureHandle texture) {
 	checkThread();
-	Texture& t = d3d.textures[texture.value];
+	ASSERT(texture.value);
+	Texture& t = *texture.value;
 	if (t.resource) d3d.frame->to_release.push(t.resource);
 	t = {};
-	MutexGuard lock(d3d.handle_mutex);
-	d3d.textures.dealloc(texture.value);
+	d3d.static_allocator.deallocate(&t);
 }
 
 void destroy(QueryHandle query) {
@@ -911,10 +939,6 @@ void preinit(IAllocator& allocator, bool load_renderdoc) {
 		d3d.frames.push(allocator);
 	}
 	d3d.frame = d3d.frames.begin();
-
-	d3d.textures.init();
-	d3d.buffers.init();
-	d3d.programs.init();
 }
 
 void shutdown() {
@@ -1073,9 +1097,9 @@ bool init(void* hwnd, u32 flags) {
 	}
 
 	bool debug = flags & (u32)InitFlags::DEBUG_OUTPUT;
-	#ifdef LUMIX_DEBUG
-		debug = true;
-	#endif
+#ifdef LUMIX_DEBUG
+	debug = true;
+#endif
 
 	d3d.thread = GetCurrentThreadId();
 	ShInitialize();
@@ -1100,7 +1124,7 @@ bool init(void* hwnd, u32 flags) {
 		return false;
 	}
 
-	#define DECL_D3D_API(f) auto api_##f = (decltype(f)*)GetProcAddress(d3d.d3d_dll, #f);
+#define DECL_D3D_API(f) auto api_##f = (decltype(f)*)GetProcAddress(d3d.d3d_dll, #f);
 
 	DECL_D3D_API(D3D12CreateDevice);
 	DECL_D3D_API(D3D12GetDebugInterface);
@@ -1238,7 +1262,8 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 
 	for (TextureHandle& handle : d3d.current_framebuffer.attachments) {
 		if (!handle.isValid()) continue;
-		Texture& t = d3d.textures[handle.value];
+		ASSERT(handle.value);
+		Texture& t = *handle.value;
 		t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
 	}
 
@@ -1255,7 +1280,8 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 		d3d.current_framebuffer.ds_format = DXGI_FORMAT_UNKNOWN;
 		for (u32 i = 0; i < num; ++i) {
 			d3d.current_framebuffer.attachments[i] = attachments[i];
-			Texture& t = d3d.textures[attachments[i].value];
+			ASSERT(attachments[i].value);
+			Texture& t = *attachments[i].value;
 			if (isDepthFormat(t.dxgi_format)) {
 				t.setState(d3d.cmd_list, readonly_ds ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE);
 				d3d.current_framebuffer.depth_stencil = allocDSV(d3d.ds_heap, t);
@@ -1293,19 +1319,22 @@ void clear(u32 flags, const float* color, float depth) {
 }
 
 void* map(BufferHandle handle, size_t size) {
-	Buffer& buffer = d3d.buffers[handle.value];
+	ASSERT(handle.value);
+	Buffer& buffer = *handle.value;
 	ASSERT(!buffer.mapped_ptr);
 	D3D12_RANGE range = {};
-	if (buffer.buffer->Map(0, &range, (void**)&buffer.mapped_ptr) != S_OK) return false;
+	HRESULT hr = buffer.resource->Map(0, &range, (void**)&buffer.mapped_ptr);
+	ASSERT(hr == S_OK);
 	ASSERT(buffer.mapped_ptr);
 	return buffer.mapped_ptr;
 }
 
 void unmap(BufferHandle handle) {
-	Buffer& buffer = d3d.buffers[handle.value];
+	ASSERT(handle.value);
+	Buffer& buffer = *handle.value;
 	ASSERT(buffer.mapped_ptr);
 	D3D12_RANGE range = {};
-	buffer.buffer->Unmap(0, &range);
+	buffer.resource->Unmap(0, &range);
 	buffer.mapped_ptr = nullptr;
 }
 
@@ -1369,6 +1398,15 @@ u32 swapBuffers() {
 	d3d.ds_heap.nextFrame();
 
 	d3d.frame->begin();
+	for (SRV& h : d3d.current_srvs) {
+		h.texture = INVALID_TEXTURE;
+		h.is_buffer = false;
+	}
+	for (SRV& h : d3d.current_images) {
+		h.texture = INVALID_TEXTURE;
+		h.is_buffer = false;
+	}
+	for (TextureHandle& h : d3d.current_framebuffer.attachments) h = INVALID_TEXTURE;
 
 	for (auto& window : d3d.windows) {
 		if (!window.handle) continue;
@@ -1420,8 +1458,9 @@ u32 swapBuffers() {
 }
 
 void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data) {
-	Buffer& buffer = d3d.buffers[handle.value];
-	ASSERT(!buffer.buffer);
+	ASSERT(handle.value);
+	Buffer& buffer = *handle.value;
+	ASSERT(!buffer.resource);
 	buffer.size = size;
 	const bool mappable = flags & (u32)BufferFlags::MAPPABLE;
 
@@ -1447,7 +1486,7 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 		size = ((size + 15) / 16) * 16;
 	}
 
-	HRESULT hr = d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, IID_PPV_ARGS(&buffer.buffer));
+	HRESULT hr = d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, IID_PPV_ARGS(&buffer.resource));
 	ASSERT(hr == S_OK);
 	buffer.state = D3D12_RESOURCE_STATE_GENERIC_READ;
 
@@ -1461,54 +1500,33 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	srv_desc.Buffer.StructureByteStride = 0;
 	srv_desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
-	buffer.heap_id = d3d.srv_heap.alloc(d3d.device, buffer.buffer, srv_desc);
+	buffer.heap_id = d3d.srv_heap.alloc(d3d.device, buffer.resource, srv_desc);
 
 	if (data) {
 		ID3D12Resource* upload_buffer = createUploadBuffer(d3d.device, data, size);
 		D3D12_RESOURCE_STATES old_state = buffer.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
-		d3d.cmd_list->CopyResource(buffer.buffer, upload_buffer);
+		d3d.cmd_list->CopyResource(buffer.resource, upload_buffer);
 		buffer.setState(d3d.cmd_list, old_state);
 		d3d.frame->to_release.push(upload_buffer);
 	}
 }
 
 ProgramHandle allocProgramHandle() {
-	MutexGuard lock(d3d.handle_mutex);
-
-	if (d3d.programs.isFull()) {
-		logError("Renderer") << "Not enough free program slots.";
-		return INVALID_PROGRAM;
-	}
-	const int id = d3d.programs.alloc();
-	Program& p = d3d.programs[id];
-	p = {};
-	return {(u32)id};
+	void* mem = d3d.static_allocator.allocate(sizeof(Program));
+	Program* p = new (NewPlaceholder(), mem) Program();
+	return {p};
 }
 
 BufferHandle allocBufferHandle() {
-	MutexGuard lock(d3d.handle_mutex);
-
-	if (d3d.buffers.isFull()) {
-		logError("Renderer") << "Not enough free buffer slots.";
-		return INVALID_BUFFER;
-	}
-	const int id = d3d.buffers.alloc();
-	Buffer& t = d3d.buffers[id];
-	t = {};
-	return {(u32)id};
+	void* mem = d3d.static_allocator.allocate(sizeof(Buffer));
+	Buffer* buffer = new (NewPlaceholder(), mem) Buffer();
+	return {buffer};
 }
 
 TextureHandle allocTextureHandle() {
-	MutexGuard lock(d3d.handle_mutex);
-
-	if (d3d.textures.isFull()) {
-		logError("Renderer") << "Not enough free texture slots.";
-		return INVALID_TEXTURE;
-	}
-	const int id = d3d.textures.alloc();
-	Texture& t = d3d.textures[id];
-	t = {};
-	return {(u32)id};
+	void* mem = d3d.static_allocator.allocate(sizeof(Texture));
+	Texture* texture = new (NewPlaceholder(), mem) Texture();
+	return {texture};
 }
 
 void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, AttributeType type, u8 flags) {
@@ -1577,7 +1595,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
 	const DXGI_FORMAT internal_format = is_srgb ? li->srgb_format : li->format;
 	const u32 mip_count = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
-	Texture& texture = d3d.textures[handle.value];
+	ASSERT(handle.value);
+	Texture& texture = *handle.value;
 	texture.flags = flags;
 	// texture.w = hdr.dwWidth;
 	// texture.h = hdr.dwHeight;
@@ -1745,7 +1764,8 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	}
 
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
-	Texture& texture = d3d.textures[handle.value];
+	ASSERT(handle.value);
+	Texture& texture = *handle.value;
 
 	D3D12_HEAP_PROPERTIES props = {};
 	props.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1809,17 +1829,17 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		toWChar(tmp, debug_name);
 		texture.resource->SetName(tmp);
 	}
-	
+
 	const u32 bytes_per_pixel = getSize(desc.Format);
 	Array<Array<u8>> mips_data(*d3d.allocator);
 	mips_data.reserve(mip_count - 1);
 	if (data) {
 		D3D12_SUBRESOURCE_DATA* srd = (D3D12_SUBRESOURCE_DATA*)_alloca(sizeof(D3D12_SUBRESOURCE_DATA) * mip_count * (is_cubemap ? 6 : depth));
 		const u8* ptr = (u8*)data;
-		
+
 		// TODO some formats are transformed to different sized dxgi formats
 		u32 idx = 0;
-		for(u32 layer = 0; layer < (is_cubemap ? 6 : depth); ++layer) {
+		for (u32 layer = 0; layer < (is_cubemap ? 6 : depth); ++layer) {
 			srd[idx].pData = ptr;
 			srd[idx].RowPitch = w * bytes_per_pixel;
 			srd[idx].SlicePitch = h * srd[idx].SlicePitch;
@@ -1833,17 +1853,11 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 				const u32 mip_w = maximum(w >> mip, 1);
 				const u32 mip_h = maximum(h >> mip, 1);
 				mip_data.resize(bytes_per_pixel * mip_w * mip_h);
-				switch(format) {
-					case TextureFormat::R8:
-						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 1);
-						break;
+				switch (format) {
+					case TextureFormat::R8: stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 1); break;
 					case TextureFormat::SRGBA:
-					case TextureFormat::RGBA8:
-						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 4);
-						break;
-					case TextureFormat::SRGB:
-						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 3);
-						break;
+					case TextureFormat::RGBA8: stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 4); break;
+					case TextureFormat::SRGB: stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 3); break;
 					case TextureFormat::R32F:
 						stbir_resize_float((const float*)prev_mip_data, prev_mip_w, prev_mip_h, 0, (float*)mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 1);
 						break;
@@ -1861,7 +1875,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 				++idx;
 			}
 		}
-		
+
 		UINT64 upload_buffer_size;
 		d3d.device->GetCopyableFootprints(&desc, 0, idx, 0, NULL, NULL, NULL, &upload_buffer_size);
 
@@ -1913,7 +1927,8 @@ void scissor(u32 x, u32 y, u32 w, u32 h) {
 }
 
 static ID3D12PipelineState* getPipelineStateCompute() {
-	Program& p = d3d.programs[d3d.current_program.value];
+	ASSERT(d3d.current_program.value);
+	Program& p = *d3d.current_program.value;
 	D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
 	desc.CS = {p.cs->GetBufferPointer(), p.cs->GetBufferSize()};
 	desc.NodeMask = 1;
@@ -1936,7 +1951,8 @@ static ID3D12PipelineState* getPipelineStateCompute() {
 }
 
 static ID3D12PipelineState* getPipelineState(D3D12_PRIMITIVE_TOPOLOGY_TYPE pt) {
-	Program& p = d3d.programs[d3d.current_program.value];
+	ASSERT(d3d.current_program.value);
+	Program& p = *d3d.current_program.value;
 	u64 state = d3d.current_state;
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
 	if (p.vs) desc.VS = {p.vs->GetBufferPointer(), p.vs->GetBufferSize()};
@@ -2147,11 +2163,11 @@ TextureInfo getTextureInfo(const void* data) {
 void destroy(BufferHandle buffer) {
 	checkThread();
 
-	Buffer& t = d3d.buffers[buffer.value];
-	if (t.buffer) d3d.frame->to_release.push(t.buffer);
+	ASSERT(buffer.value);
+	Buffer& t = *buffer.value;
+	if (t.resource) d3d.frame->to_release.push(t.resource);
 
-	MutexGuard lock(d3d.handle_mutex);
-	d3d.buffers.dealloc(buffer.value);
+	d3d.static_allocator.deallocate(&t);
 }
 
 void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags) {
@@ -2162,7 +2178,9 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags) {
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
 	if (buffer.isValid()) {
-		ID3D12Resource* b = d3d.buffers[buffer.value].buffer;
+		ASSERT(buffer.value);
+		ID3D12Resource* b = buffer.value->resource;
+		ASSERT(b);
 		d3d.cmd_list->SetGraphicsRootConstantBufferView(index, b->GetGPUVirtualAddress() + offset);
 		d3d.cmd_list->SetComputeRootConstantBufferView(index, b->GetGPUVirtualAddress() + offset);
 	} else {
@@ -2188,7 +2206,7 @@ void drawIndirect(DataType index_type) {
 }
 
 void bindIndirectBuffer(BufferHandle handle) {
-	// d3d.current_indirect_buffer = handle;
+	d3d.current_indirect_buffer = handle;
 }
 
 void bindIndexBuffer(BufferHandle handle) {
@@ -2209,14 +2227,17 @@ void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
 
 void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride_in_bytes) {
 	if (buffer.isValid()) {
-		Buffer& b = d3d.buffers[buffer.value];
+		Buffer& b = *buffer.value;
 		D3D12_VERTEX_BUFFER_VIEW vbv;
-		vbv.BufferLocation = b.buffer->GetGPUVirtualAddress() + buffer_offset;
+		vbv.BufferLocation = b.resource->GetGPUVirtualAddress() + buffer_offset;
 		vbv.StrideInBytes = stride_in_bytes;
 		vbv.SizeInBytes = UINT(b.size - buffer_offset);
 		d3d.cmd_list->IASetVertexBuffers(binding_idx, 1, &vbv);
 	} else {
 		D3D12_VERTEX_BUFFER_VIEW vbv = {};
+		vbv.BufferLocation = 0;
+		vbv.StrideInBytes = stride_in_bytes;
+		vbv.SizeInBytes = 0;
 		d3d.cmd_list->IASetVertexBuffers(binding_idx, 1, &vbv);
 	}
 }
@@ -2231,7 +2252,8 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 		d3d.current_srvs[i + offset].is_buffer = false;
 		d3d.current_srvs[i + offset].texture = handles[i];
 		if (handles[i].isValid()) {
-			Texture& t = d3d.textures[handles[i].value];
+			ASSERT(handles[i].value);
+			Texture& t = *handles[i].value;
 			if (t.resource) {
 				// for (TextureHandle h : d3d.current_framebuffer.attachments) {
 				//	if (h.value == handles[i].value) goto next;
@@ -2265,7 +2287,8 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 			break;
 	}
 
-	ID3D12Resource* b = d3d.buffers[d3d.current_index_buffer.value].buffer;
+	ASSERT(d3d.current_index_buffer.value);
+	ID3D12Resource* b = d3d.current_index_buffer.value->resource;
 	D3D12_INDEX_BUFFER_VIEW ibv = {};
 	ibv.BufferLocation = b->GetGPUVirtualAddress();
 	ibv.Format = dxgi_index_type;
@@ -2321,7 +2344,8 @@ void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, Dat
 	}
 
 	ASSERT((offset_bytes & (offset_shift - 1)) == 0);
-	ID3D12Resource* b = d3d.buffers[d3d.current_index_buffer.value].buffer;
+	ASSERT(d3d.current_index_buffer.value);
+	ID3D12Resource* b = d3d.current_index_buffer.value->resource;
 	D3D12_INDEX_BUFFER_VIEW ibv = {};
 	ibv.BufferLocation = b->GetGPUVirtualAddress();
 	ibv.Format = dxgi_index_type;
@@ -2339,25 +2363,28 @@ void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, Dat
 }
 
 void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size) {
-	Buffer& bdst = d3d.buffers[dst.value];
-	const Buffer& bsrc = d3d.buffers[src.value];
+	ASSERT(src.value);
+	ASSERT(dst.value);
+	Buffer& bdst = *dst.value;
+	const Buffer& bsrc = *src.value;
 	ASSERT(!bdst.mapped_ptr);
 	ASSERT(!bsrc.mapped_ptr);
 	D3D12_RESOURCE_STATES state = bdst.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
-	d3d.cmd_list->CopyBufferRegion(bdst.buffer, dst_offset, bsrc.buffer, 0, size);
+	d3d.cmd_list->CopyBufferRegion(bdst.resource, dst_offset, bsrc.resource, 0, size);
 	bdst.setState(d3d.cmd_list, state);
 }
 
 void update(BufferHandle buffer, const void* data, size_t size) {
 	checkThread();
-	Buffer& b = d3d.buffers[buffer.value];
+	ASSERT(buffer.value);
+	Buffer& b = *buffer.value;
 
 	u8* dst = d3d.frame->scratch_buffer_ptr;
 	ASSERT(size + dst <= d3d.frame->scratch_buffer_begin + SCRATCH_BUFFER_SIZE);
 	memcpy(dst, data, size);
 	UINT64 src_offset = dst - d3d.frame->scratch_buffer_begin;
 	D3D12_RESOURCE_STATES state = b.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
-	d3d.cmd_list->CopyBufferRegion(b.buffer, 0, d3d.frame->scratch_buffer, src_offset, size);
+	d3d.cmd_list->CopyBufferRegion(b.resource, 0, d3d.frame->scratch_buffer, src_offset, size);
 	b.setState(d3d.cmd_list, state);
 
 	d3d.frame->scratch_buffer_ptr += size;
@@ -2556,7 +2583,8 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 }
 
 bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name) {
-	Program& program = d3d.programs[handle.value];
+	ASSERT(handle.value);
+	Program& program = *handle.value;
 	program = {};
 
 	void* vs_bytecode = nullptr;
