@@ -769,6 +769,7 @@ void destroy(QueryHandle query) {
 void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
 	// d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	// d3d.device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
+	ASSERT(false); // TODO
 }
 
 void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) {
@@ -784,11 +785,13 @@ void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) 
 	//
 	// d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc,
 	// &view.srv);
+	ASSERT(false); // TODO
 }
 
 void generateMipmaps(TextureHandle handle) {
 	// Texture& t = d3d.textures[handle.value];
 	// d3d.device_ctx->GenerateMips(t.srv);
+	ASSERT(false); // TODO
 }
 
 void update(TextureHandle texture_handle, u32 mip, u32 face, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {
@@ -810,6 +813,7 @@ void update(TextureHandle texture_handle, u32 mip, u32 face, u32 x, u32 y, u32 w
 	//
 	// d3d.device_ctx->UpdateSubresource(texture.texture2D, subres, &box, buf,
 	// row_pitch, depth_pitch);
+	ASSERT(false); // TODO
 }
 
 void copy(TextureHandle dst_handle, TextureHandle src_handle, u32 dst_x, u32 dst_y) {
@@ -844,6 +848,7 @@ void copy(TextureHandle dst_handle, TextureHandle src_handle, u32 dst_x, u32 dst
 	//	if (src.flags & (u32)TextureFlags::NO_MIPS) break;
 	//	if (dst.flags & (u32)TextureFlags::NO_MIPS) break;
 	//}
+	ASSERT(false); // TODO
 }
 
 void readTexture(TextureHandle handle, u32 mip, Span<u8> buf) {
@@ -863,6 +868,7 @@ void readTexture(TextureHandle handle, u32 mip, Span<u8> buf) {
 	// data.pData, data.DepthPitch); 	ptr += data.DepthPitch;
 	//	d3d.device_ctx->Unmap(texture.texture2D, subres);
 	//}
+	ASSERT(false); // TODO
 }
 
 void queryTimestamp(QueryHandle query) {
@@ -1216,6 +1222,7 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip) {
 	// d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count,
 	// d3d.current_framebuffer.render_targets,
 	// d3d.current_framebuffer.depth_stencil);
+	ASSERT(false); // TODO
 }
 
 void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
@@ -1590,32 +1597,11 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 		}
 	}
 
-	if (is_cubemap) {
-		// D3D11_TEXTURE2D_DESC desc = {};
-		//
-		// desc.Width = maximum(li->block_width, hdr.dwWidth);
-		// desc.Height = maximum(li->block_width, hdr.dwHeight);
-		// desc.ArraySize = 6;
-		// desc.MipLevels = mip_count;
-		// desc.CPUAccessFlags = 0;
-		// desc.Format = is_srgb ? li->srgb_format : li->format;
-		// desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		// desc.MiscFlags = 0;
-		// desc.Usage = D3D11_USAGE_DEFAULT;
-		// desc.SampleDesc.Count = 1;
-		// desc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
-		// texture.dxgi_format = desc.Format;
-		// HRESULT hr = d3d.device->CreateTexture2D(&desc, srd, &texture.texture2D);
-		// ASSERT(SUCCEEDED(hr));
-		//
-		// D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-		// srv_desc.Format = toViewFormat(desc.Format);
-		// srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-		// srv_desc.TextureCube.MipLevels = mip_count;
-		//
-		// hr = d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
-		// ASSERT(SUCCEEDED(hr));
-	} else if (layers > 1) {
+	D3D12_HEAP_PROPERTIES props = {};
+	props.Type = D3D12_HEAP_TYPE_DEFAULT;
+	props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	if (layers > 1) {
 		// D3D11_TEXTURE2D_DESC desc = {};
 		//
 		// desc.Width = maximum(li->block_width, hdr.dwWidth);
@@ -1641,17 +1627,13 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 		//
 		// hr = d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 		// ASSERT(SUCCEEDED(hr));
+		ASSERT(false);
 	} else {
-		D3D12_HEAP_PROPERTIES props = {};
-		props.Type = D3D12_HEAP_TYPE_DEFAULT;
-		props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-		props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-
 		D3D12_RESOURCE_DESC desc = {};
 		desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 		desc.Width = maximum(li->block_width, hdr.dwWidth);
 		desc.Height = maximum(li->block_width, hdr.dwHeight);
-		desc.DepthOrArraySize = layers;
+		desc.DepthOrArraySize = is_cubemap ? 6 : layers;
 		desc.MipLevels = mip_count;
 		desc.Format = is_srgb ? li->srgb_format : li->format;
 		desc.SampleDesc.Count = 1;
@@ -1666,11 +1648,19 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 		D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 		srv_desc.Format = toViewFormat(desc.Format);
 		srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		srv_desc.Texture2D.MipLevels = mip_count;
-		srv_desc.Texture2D.MostDetailedMip = 0;
-		srv_desc.Texture2D.ResourceMinLODClamp = 0;
-		srv_desc.Texture2D.PlaneSlice = 0;
+		if (is_cubemap) {
+			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+			srv_desc.TextureCube.MipLevels = mip_count;
+			srv_desc.TextureCube.MostDetailedMip = 0;
+			srv_desc.TextureCube.ResourceMinLODClamp = 0;
+		}
+		else {
+			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srv_desc.Texture2D.MipLevels = mip_count;
+			srv_desc.Texture2D.MostDetailedMip = 0;
+			srv_desc.Texture2D.ResourceMinLODClamp = 0;
+			srv_desc.Texture2D.PlaneSlice = 0;
+		}
 
 		texture.heap_id = d3d.srv_heap.alloc(d3d.device, texture.resource, srv_desc);
 
@@ -2164,6 +2154,7 @@ void drawIndirect(DataType index_type) {
 	// d3d.device_ctx->IASetIndexBuffer(index_b, dxgi_index_type, 0);
 	// d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	// d3d.device_ctx->DrawIndexedInstancedIndirect(indirect_b, 0);
+	ASSERT(false); // TODO
 }
 
 void bindIndirectBuffer(BufferHandle handle) {
