@@ -109,59 +109,33 @@ static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 	return DXGI_FORMAT_R8G8B8A8_UINT;
 }
 
-template <typename T, u32 MAX_COUNT>
-struct Pool
-{
-	void init()
-	{
-		values = (T*)mem;
-		for (int i = 0; i < MAX_COUNT; ++i) {
-			new (&values[i]) int(i + 1);
-		}
-		new (&values[MAX_COUNT - 1]) int(-1);
-		first_free = 0;
-	}
-
-	template <typename... Args>
-	int alloc(Args&&... args)
-	{
-		if(first_free == -1) return -1;
-
-		++count;
-		const int id = first_free;
-		first_free = *((int*)&values[id]);
-		new (&values[id]) T(args...);
-		return id;
-	}
-
-	void dealloc(u32 idx)
-	{
-		--count;
-		values[idx].~T();
-		*((int*)&values[idx]) = first_free;
-		first_free = idx;
-	}
-
-	alignas(T) u8 mem[sizeof(T) * MAX_COUNT];
-	T* values;
-	int first_free;
-	u32 count = 0;
-
-	T& operator[](int idx) { return values[idx]; }
-	bool isFull() const { return first_free == -1; }
-
-	static constexpr u32 CAPACITY = MAX_COUNT;
-};
 
 struct Program {
+	~Program() {
+		if (gs) gs->Release();
+		if (ps) ps->Release();
+		if (vs) vs->Release();
+		if (cs) cs->Release();
+		if (il) il->Release();
+	}
+
 	ID3D11VertexShader* vs = nullptr;
 	ID3D11PixelShader* ps = nullptr;
 	ID3D11GeometryShader* gs = nullptr;
 	ID3D11ComputeShader* cs = nullptr;
 	ID3D11InputLayout* il = nullptr;
+	#ifdef LUMIX_DEBUG
+		StaticString<64> name;
+	#endif
 };
 
 struct Buffer {
+	~Buffer() {
+		if (srv) srv->Release();
+		if (uav) uav->Release();
+		buffer->Release();
+	}
+
 	ID3D11Buffer* buffer = nullptr;
 	ID3D11ShaderResourceView* srv = nullptr;
 	ID3D11UnorderedAccessView* uav = nullptr;
@@ -170,17 +144,21 @@ struct Buffer {
 };
 
 struct Texture {
-	union {
-		ID3D11Texture2D* texture2D;
-		ID3D11Texture3D* texture3D;
-	};
-	union {
-		ID3D11RenderTargetView* rtv;
-		struct {
-			ID3D11DepthStencilView* dsv;
-			ID3D11DepthStencilView* dsv_ro;
-		};
-	};
+	~Texture() {
+		if (srv) srv->Release();
+		if (dsv_ro) dsv_ro->Release();
+		if (dsv) dsv->Release();
+		if (rtv) rtv->Release();
+		if (uav) uav->Release();
+		if (texture2D) texture2D->Release();
+		if (texture3D) texture3D->Release();
+	}
+
+	ID3D11Texture2D* texture2D = nullptr;
+	ID3D11Texture3D* texture3D = nullptr;
+	ID3D11RenderTargetView* rtv = nullptr;
+	ID3D11DepthStencilView* dsv = nullptr;
+	ID3D11DepthStencilView* dsv_ro = nullptr;
 	ID3D11UnorderedAccessView* uav = nullptr;
 	u32 rtv_face = 0;
 	u32 rtv_mip = 0;
@@ -191,9 +169,16 @@ struct Texture {
 	ID3D11SamplerState* sampler;
 	DXGI_FORMAT dxgi_format;
 	u32 bound_to_output = 0xffFFffFF;
+	u32 bound_to_input = 0xffFFffFF;
+	#ifdef LUMIX_DEBUG
+		StaticString<64> name;
+	#endif
 };
 
 struct Query {
+	~Query() {
+		if (query) query->Release();
+	}
 	ID3D11Query* query;
 };
 
@@ -232,6 +217,7 @@ static struct D3D {
 	IAllocator* allocator = nullptr;
 	ID3D11DeviceContext1* device_ctx = nullptr;
 	TextureHandle bound_image_textures[16];
+	TextureHandle bound_textures[16];
 	ID3D11Device* device = nullptr;
 	ID3DUserDefinedAnnotation* annotation = nullptr;
 	ID3D11Query* disjoint_query = nullptr;
@@ -240,11 +226,6 @@ static struct D3D {
 
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	BufferHandle current_indirect_buffer = INVALID_BUFFER;
-	Mutex handle_mutex;
-	Pool<Query, 2048> queries;
-	Pool<Program, 256> programs;
-	Pool<Buffer, 8192> buffers;
-	Pool<Texture, 4096> textures;
 	Window windows[64];
 	Window* current_window = windows;
 	ID3D11SamplerState* samplers[2*2*2*2];
@@ -255,6 +236,10 @@ static struct D3D {
 	HashMap<u64, State> state_cache;
 	HMODULE d3d_dll;
 	HMODULE dxgi_dll;
+	ProgramHandle current_program = nullptr;
+	#ifdef LUMIX_DEBUG
+		StaticString<64> debug_group;
+	#endif
 } d3d;
 
 namespace DDS
@@ -388,14 +373,14 @@ static DXGI_FORMAT toDSViewFormat(DXGI_FORMAT format) {
 
 QueryHandle createQuery() {
 	checkThread();
-	MutexGuard lock(d3d.handle_mutex);
-	const int idx = d3d.queries.alloc();
-	d3d.queries[idx] = {};
+
+	Query* q = LUMIX_NEW(*d3d.allocator, Query);
+	*q = {};
 	D3D11_QUERY_DESC desc = {};
 	desc.Query = D3D11_QUERY_TIMESTAMP;
-	d3d.device->CreateQuery(&desc, &d3d.queries[idx].query);
-	ASSERT(d3d.queries[idx].query);
-	return { (u32)idx }; 
+	d3d.device->CreateQuery(&desc, &q->query);
+	ASSERT(q->query);
+	return { q }; 
 }
 
 void startCapture()
@@ -419,44 +404,17 @@ void checkThread() {
 void destroy(ProgramHandle program) {
 	checkThread();
 	
-	Program& p = d3d.programs[program.value];
-	if (p.gs) p.gs->Release();
-	if (p.ps) p.ps->Release();
-	if (p.vs) p.vs->Release();
-	if (p.cs) p.cs->Release();
-	if (p.il) p.il->Release();
-
-	MutexGuard lock(d3d.handle_mutex);
-	d3d.programs.dealloc(program.value);
+	LUMIX_DELETE(*d3d.allocator, program)
 }
 
 void destroy(TextureHandle texture) {
 	checkThread();
-	Texture& t = d3d.textures[texture.value];
-	if (t.srv) t.srv->Release();
-	
-	if (isDepthFormat(t.dxgi_format)) {
-		if (t.dsv_ro) t.dsv_ro->Release();
-		if (t.dsv) t.dsv->Release();
-	}
-	else {
-		if (t.rtv) t.rtv->Release();
-	}
-
-	if (t.uav) t.uav->Release();
-	if (t.texture2D) t.texture2D->Release();
-
-	MutexGuard lock(d3d.handle_mutex);
-	d3d.textures.dealloc(texture.value);
+	LUMIX_DELETE(*d3d.allocator, texture);
 }
 
 void destroy(QueryHandle query) {
 	checkThread();
-
-	d3d.queries[query.value].query->Release();
-
-	MutexGuard lock(d3d.handle_mutex);
-	d3d.queries.dealloc(query.value);
+	LUMIX_DELETE(*d3d.allocator, query);
 }
 
 void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
@@ -464,32 +422,34 @@ void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
 	d3d.device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
-void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) {
-	Texture& texture = d3d.textures[texture_handle.value];
-	Texture& view = d3d.textures[view_handle.value];
-	view.dxgi_format = texture.dxgi_format;
-	view.sampler = texture.sampler;
+void createTextureView(TextureHandle view, TextureHandle texture) {
+	ASSERT(view);
+	ASSERT(texture);
+
+	view->dxgi_format = texture->dxgi_format;
+	view->sampler = texture->sampler;
 	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-	texture.srv->GetDesc(&srv_desc);
+	texture->srv->GetDesc(&srv_desc);
 	if (srv_desc.ViewDimension != D3D_SRV_DIMENSION_TEXTURE2D) {
 		srv_desc.ViewDimension = D3D_SRV_DIMENSION_TEXTURE2D;
 	}
 
-	d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &view.srv);
+	d3d.device->CreateShaderResourceView(texture->texture2D, &srv_desc, &view->srv);
 }
 
-void generateMipmaps(TextureHandle handle){
-	Texture& t = d3d.textures[handle.value];
-	d3d.device_ctx->GenerateMips(t.srv);
+void generateMipmaps(TextureHandle texture){
+	ASSERT(texture);
+	d3d.device_ctx->GenerateMips(texture->srv);
 }
 
-void update(TextureHandle texture_handle, u32 mip, u32 face, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {
-	Texture& texture = d3d.textures[texture_handle.value];
-	ASSERT(texture.dxgi_format == getDXGIFormat(format));
-	const bool no_mips = texture.flags & (u32)TextureFlags::NO_MIPS;
-	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture.w, texture.h));
+void update(TextureHandle texture, u32 mip, u32 face, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {
+	ASSERT(texture);
+	ASSERT(texture->dxgi_format == getDXGIFormat(format));
+
+	const bool no_mips = texture->flags & (u32)TextureFlags::NO_MIPS;
+	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture->w, texture->h));
 	const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
-	const u32 bytes_per_pixel = getSize(texture.dxgi_format);
+	const u32 bytes_per_pixel = getSize(texture->dxgi_format);
 	const UINT row_pitch = w * bytes_per_pixel;
 	const UINT depth_pitch = row_pitch * h;
 	D3D11_BOX box;
@@ -500,69 +460,71 @@ void update(TextureHandle texture_handle, u32 mip, u32 face, u32 x, u32 y, u32 w
 	box.front = 0;
 	box.back = 1;
 	
-	d3d.device_ctx->UpdateSubresource(texture.texture2D, subres, &box, buf, row_pitch, depth_pitch);
+	d3d.device_ctx->UpdateSubresource(texture->texture2D, subres, &box, buf, row_pitch, depth_pitch);
 }
 
-void copy(TextureHandle dst_handle, TextureHandle src_handle, u32 dst_x, u32 dst_y) {
-	Texture& dst = d3d.textures[dst_handle.value];
-	Texture& src = d3d.textures[src_handle.value];
-	const bool no_mips = src.flags & (u32)TextureFlags::NO_MIPS;
-	const u32 src_mip_count = no_mips ? 1 : 1 + log2(maximum(src.w, src.h));
-	const u32 dst_mip_count = no_mips ? 1 : 1 + log2(maximum(dst.w, dst.h));
+void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
+	ASSERT(dst);
+	ASSERT(src);
+
+	const bool no_mips = src->flags & (u32)TextureFlags::NO_MIPS;
+	const u32 src_mip_count = no_mips ? 1 : 1 + log2(maximum(src->w, src->h));
+	const u32 dst_mip_count = no_mips ? 1 : 1 + log2(maximum(dst->w, dst->h));
 
 	u32 mip = 0;
-	while ((src.w >> mip) != 0 || (src.h >> mip) != 0) {
-		const u32 w = maximum(src.w >> mip, 1);
-		const u32 h = maximum(src.h >> mip, 1);
+	while ((src->w >> mip) != 0 || (src->h >> mip) != 0) {
+		const u32 w = maximum(src->w >> mip, 1);
+		const u32 h = maximum(src->h >> mip, 1);
 
-		if (src.flags & (u32)TextureFlags::IS_CUBE) {
+		if (src->flags & (u32)TextureFlags::IS_CUBE) {
 			for (u32 face = 0; face < 6; ++face) {
 				const UINT src_subres = D3D11CalcSubresource(mip, face, src_mip_count);
 				const UINT dst_subres = D3D11CalcSubresource(mip, face, dst_mip_count);
-				d3d.device_ctx->CopySubresourceRegion(dst.texture2D, dst_subres, dst_x, dst_y, 0, src.texture2D, src_subres, nullptr);
+				d3d.device_ctx->CopySubresourceRegion(dst->texture2D, dst_subres, dst_x, dst_y, 0, src->texture2D, src_subres, nullptr);
 			}
 		}
 		else {
 			const UINT src_subres = D3D11CalcSubresource(mip, 0, src_mip_count);
 			const UINT dst_subres = D3D11CalcSubresource(mip, 0, dst_mip_count);
-			d3d.device_ctx->CopySubresourceRegion(dst.texture2D, dst_subres, dst_x, dst_y, 0, src.texture2D, src_subres, nullptr);
+			d3d.device_ctx->CopySubresourceRegion(dst->texture2D, dst_subres, dst_x, dst_y, 0, src->texture2D, src_subres, nullptr);
 		}
 		++mip;
-		if (src.flags & (u32)TextureFlags::NO_MIPS) break;
-		if (dst.flags & (u32)TextureFlags::NO_MIPS) break;
+		if (src->flags & (u32)TextureFlags::NO_MIPS) break;
+		if (dst->flags & (u32)TextureFlags::NO_MIPS) break;
 	}
 }
 
-void readTexture(TextureHandle handle, u32 mip, Span<u8> buf) {
-	Texture& texture = d3d.textures[handle.value];
-
+void readTexture(TextureHandle texture, u32 mip, Span<u8> buf) {
+	ASSERT(texture);
 	D3D11_MAPPED_SUBRESOURCE data;
 	
-	const u32 faces = (texture.flags & (u32)TextureFlags::IS_CUBE) ? 6 : 1;
-	const bool no_mips = texture.flags & (u32)TextureFlags::NO_MIPS;
-	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture.w, texture.h));
+	const u32 faces = (texture->flags & (u32)TextureFlags::IS_CUBE) ? 6 : 1;
+	const bool no_mips = texture->flags & (u32)TextureFlags::NO_MIPS;
+	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture->w, texture->h));
 	u8* ptr = buf.begin();
 	
 	for (u32 face = 0; face < faces; ++face) {
 		const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
-		d3d.device_ctx->Map(texture.texture2D, subres, D3D11_MAP_READ, 0, &data);
+		d3d.device_ctx->Map(texture->texture2D, subres, D3D11_MAP_READ, 0, &data);
 		ASSERT(data.DepthPitch == buf.length() / faces);
 		memcpy(ptr, data.pData, data.DepthPitch);
 		ptr += data.DepthPitch;
-		d3d.device_ctx->Unmap(texture.texture2D, subres);
+		d3d.device_ctx->Unmap(texture->texture2D, subres);
 	}
 }
 
 void queryTimestamp(QueryHandle query) {
 	checkThread();
-	d3d.device_ctx->End(d3d.queries[query.value].query);
+	ASSERT(query);
+	d3d.device_ctx->End(query->query);
 }
 
 u64 getQueryFrequency() { return d3d.query_frequency; }
 
 u64 getQueryResult(QueryHandle query) {
 	checkThread();
-	ID3D11Query* q = d3d.queries[query.value].query;
+	ASSERT(query);
+	ID3D11Query* q = query->query;
 	u64 time;
 	const HRESULT res = d3d.device_ctx->GetData(q, &time, sizeof(time), 0);
 	ASSERT(res == S_OK);
@@ -571,7 +533,8 @@ u64 getQueryResult(QueryHandle query) {
 
 bool isQueryReady(QueryHandle query) { 
 	checkThread();
-	ID3D11Query* q = d3d.queries[query.value].query;
+	ASSERT(query);
+	ID3D11Query* q = query->query;
 	const HRESULT res = d3d.device_ctx->GetData(q, nullptr, 0, 0);
 	return res == S_OK;
 }
@@ -580,19 +543,10 @@ void preinit(IAllocator& allocator, bool load_renderdoc)
 {
 	if (load_renderdoc) try_load_renderdoc();
 	d3d.allocator = &allocator;
-	d3d.textures.init();
-	d3d.buffers.init();
-	d3d.programs.init();
-	d3d.queries.init();
 }
 
 void shutdown() {
 	ShFinalize();
-
-	ASSERT(d3d.buffers.count == 0);
-	ASSERT(d3d.programs.count == 0);
-	ASSERT(d3d.queries.count == 0);
-	ASSERT(d3d.textures.count == 0);
 
 	for (const D3D::State& s : d3d.state_cache) {
 		s.bs->Release();
@@ -750,7 +704,7 @@ bool init(void* hwnd, u32 flags) {
 			if (SUCCEEDED(hr)) {
 				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_ERROR, true);
 				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_CORRUPTION, true);
-				//info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, true);
+				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, true);
 				info_queue->Release();
 			}
 			d3d_debug->Release();
@@ -790,6 +744,9 @@ void pushDebugGroup(const char* msg)
 	WCHAR tmp[128];
 	toWChar(tmp, msg);
 	d3d.annotation->BeginEvent(tmp);
+	#ifdef LUMIX_DEBUG
+		d3d.debug_group = msg;
+	#endif
 }
 
 void popDebugGroup()
@@ -799,29 +756,29 @@ void popDebugGroup()
 
 void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
 {
+	ASSERT(cube);
 	d3d.current_framebuffer.count = 0;
 	d3d.current_framebuffer.depth_stencil = nullptr;
-	Texture& t = d3d.textures[cube.value];
-	if (t.rtv && (t.rtv_face != face || t.rtv_mip) != mip) {
-		t.rtv->Release();
-		t.rtv = nullptr;
+	if (cube->rtv && (cube->rtv_face != face || cube->rtv_mip) != mip) {
+		cube->rtv->Release();
+		cube->rtv = nullptr;
 	}
-	if(!t.rtv) {
+	if(!cube->rtv) {
 		D3D11_RENDER_TARGET_VIEW_DESC desc = {};
-		desc.Format = t.dxgi_format;
+		desc.Format = cube->dxgi_format;
 		desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
 		desc.Texture2DArray.MipSlice = mip;
 		desc.Texture2DArray.ArraySize = 1;
 		desc.Texture2DArray.FirstArraySlice = face;
-		d3d.device->CreateRenderTargetView((ID3D11Resource*)t.texture2D, &desc, &t.rtv);
+		d3d.device->CreateRenderTargetView((ID3D11Resource*)cube->texture2D, &desc, &cube->rtv);
 	}
 	ASSERT(d3d.current_framebuffer.count < (u32)lengthOf(d3d.current_framebuffer.render_targets));
-	d3d.current_framebuffer.render_targets[d3d.current_framebuffer.count] = t.rtv;
+	d3d.current_framebuffer.render_targets[d3d.current_framebuffer.count] = cube->rtv;
 
 	ID3D11ShaderResourceView* tmp[16] = {};
 	d3d.device_ctx->VSGetShaderResources(0, lengthOf(tmp), tmp);
 	for (ID3D11ShaderResourceView*& srv : tmp) {
-		if (t.srv == srv) {
+		if (cube->srv == srv) {
 			const u32 idx = u32(&srv - tmp);
 			ID3D11ShaderResourceView* empty = nullptr;
 			d3d.device_ctx->VSSetShaderResources(idx, 1, &empty);
@@ -843,10 +800,21 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 		d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
 		return;
 	}
+
 	d3d.current_framebuffer.count = 0;
 	d3d.current_framebuffer.depth_stencil = nullptr;
 	for(u32 i = 0; i < num; ++i) {
-		Texture& t = d3d.textures[attachments[i].value];
+		ASSERT(attachments[i]);
+		Texture& t = *attachments[i];
+		if (t.bound_to_input != 0xffFFffFF && d3d.bound_textures[t.bound_to_input] == &t) {
+			ID3D11ShaderResourceView* empty = nullptr;
+			d3d.device_ctx->VSSetShaderResources(t.bound_to_input, 1, &empty);
+			d3d.device_ctx->PSSetShaderResources(t.bound_to_input, 1, &empty);
+			d3d.device_ctx->CSSetShaderResources(t.bound_to_input, 1, &empty);
+			d3d.bound_textures[t.bound_to_input] = INVALID_TEXTURE;
+			t.bound_to_input = 0xffFFffFF;
+		}
+
 		if (isDepthFormat(t.dxgi_format)) {
 			ASSERT(!d3d.current_framebuffer.depth_stencil);
 			if(readonly_ds && !t.dsv_ro) {
@@ -879,21 +847,6 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 			++d3d.current_framebuffer.count;
 		}
 	}
-	
-	ID3D11ShaderResourceView* tmp[16] = {};
-	d3d.device_ctx->VSGetShaderResources(0, lengthOf(tmp), tmp);
-	for (ID3D11ShaderResourceView*& srv : tmp) {
-		for (u32 i = 0; i < num; ++i) {
-			Texture& t = d3d.textures[attachments[i].value];
-			if (t.srv == srv) {
-				ID3D11ShaderResourceView* empty = nullptr;
-				const u32 idx = u32(&srv - tmp);
-				d3d.device_ctx->VSSetShaderResources(idx, 1, &empty);
-				d3d.device_ctx->PSSetShaderResources(idx, 1, &empty);
-				break;
-			}
-		}
-	}
 
 	d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
 }
@@ -917,23 +870,23 @@ void clear(u32 flags, const float* color, float depth)
 	}
 }
 
-void* map(BufferHandle handle, size_t size)
+void* map(BufferHandle buffer, size_t size)
 {
-	Buffer& buffer = d3d.buffers[handle.value];
+	ASSERT(buffer);
 	D3D11_MAP map = D3D11_MAP_WRITE_DISCARD;
-	ASSERT(!buffer.mapped_ptr);
+	ASSERT(!buffer->mapped_ptr);
 	D3D11_MAPPED_SUBRESOURCE msr;
-	d3d.device_ctx->Map(buffer.buffer, 0, map, 0, &msr);
-	buffer.mapped_ptr = (u8*)msr.pData;
-	return buffer.mapped_ptr;
+	d3d.device_ctx->Map(buffer->buffer, 0, map, 0, &msr);
+	buffer->mapped_ptr = (u8*)msr.pData;
+	return buffer->mapped_ptr;
 }
 
-void unmap(BufferHandle handle)
+void unmap(BufferHandle buffer)
 {
-	Buffer& buffer = d3d.buffers[handle.value];
-	ASSERT(buffer.mapped_ptr);
-	d3d.device_ctx->Unmap(buffer.buffer, 0);
-	buffer.mapped_ptr = nullptr;
+	ASSERT(buffer);
+	ASSERT(buffer->mapped_ptr);
+	d3d.device_ctx->Unmap(buffer->buffer, 0);
+	buffer->mapped_ptr = nullptr;
 }
 
 bool getMemoryStats(Ref<MemoryStats> stats) { return false; }
@@ -1102,17 +1055,17 @@ u32 swapBuffers()
 
 void waitFrame(u32 frame) {}
 
-void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
+void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 {
-	Buffer& buffer = d3d.buffers[handle.value];
-	ASSERT(!buffer.buffer);
+	ASSERT(buffer);
+	ASSERT(!buffer->buffer);
 	D3D11_BUFFER_DESC desc = {};
 	if(flags & (u32)BufferFlags::SHADER_BUFFER) {
 		size = ((size + 15) / 16) * 16;
 	}
 
 	desc.ByteWidth = (UINT)size;
-	buffer.is_constant_buffer = flags & (u32)BufferFlags::UNIFORM_BUFFER;
+	buffer->is_constant_buffer = flags & (u32)BufferFlags::UNIFORM_BUFFER;
 	if (flags & (u32)BufferFlags::UNIFORM_BUFFER) {
 		desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; 
 	}
@@ -1140,7 +1093,7 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	}
 	D3D11_SUBRESOURCE_DATA initial_data = {};
 	initial_data.pSysMem = data;
-	d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer.buffer);
+	d3d.device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer->buffer);
 
 	if(flags & (u32)BufferFlags::SHADER_BUFFER) {
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
@@ -1151,7 +1104,7 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 		
 		srv_desc.BufferEx.NumElements = UINT(size / 4);
 
-		d3d.device->CreateShaderResourceView(buffer.buffer, &srv_desc, &buffer.srv);
+		d3d.device->CreateShaderResourceView(buffer->buffer, &srv_desc, &buffer->srv);
 
 		if (flags & (u32)BufferFlags::COMPUTE_WRITE) {
 			D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
@@ -1160,51 +1113,28 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 			uav_desc.Buffer.FirstElement = 0;
 			uav_desc.Buffer.NumElements = UINT(size / 16);
 			uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
-			d3d.device->CreateUnorderedAccessView(buffer.buffer, &uav_desc, &buffer.uav);
+			d3d.device->CreateUnorderedAccessView(buffer->buffer, &uav_desc, &buffer->uav);
 		}
 	}
 }
 
 ProgramHandle allocProgramHandle()
 {
-	MutexGuard lock(d3d.handle_mutex);
-
-	if(d3d.programs.isFull()) {
-		logError("Renderer") << "Not enough free program slots.";
-		return INVALID_PROGRAM;
-	}
-	const int id = d3d.programs.alloc();
-	Program& p = d3d.programs[id];
-	p = {};
-	return { (u32)id };
+	Program* p = LUMIX_NEW(*d3d.allocator, Program);
+	*p = {};
+	return { p };
 }
 
 BufferHandle allocBufferHandle()
 {
-	MutexGuard lock(d3d.handle_mutex);
-
-	if(d3d.buffers.isFull()) {
-		logError("Renderer") << "Not enough free buffer slots.";
-		return INVALID_BUFFER;
-	}
-	const int id = d3d.buffers.alloc();
-	Buffer& t = d3d.buffers[id];
-	t = {};
-	return { (u32)id };
+	Buffer* b = LUMIX_NEW(*d3d.allocator, Buffer);
+	return { b };
 }
 
 TextureHandle allocTextureHandle()
 {
-	MutexGuard lock(d3d.handle_mutex);
-
-	if(d3d.textures.isFull()) {
-		logError("Renderer") << "Not enough free texture slots.";
-		return INVALID_TEXTURE;
-	}
-	const int id = d3d.textures.alloc();
-	Texture& t = d3d.textures[id];
-	t = {};
-	return { (u32)id };
+	Texture* t = LUMIX_NEW(*d3d.allocator, Texture);
+	return { t };
 }
 
 void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, AttributeType type, u8 flags) {
@@ -1243,6 +1173,7 @@ ID3D11SamplerState* getSampler(u32 flags) {
 
 bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, const char* debug_name) { 
 	ASSERT(debug_name && debug_name[0]);
+	ASSERT(handle);
 	checkThread();
 	DDS::Header hdr;
 
@@ -1304,11 +1235,14 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
 	const DXGI_FORMAT internal_format = is_srgb ? li->srgb_format : li->format;
 	const u32 mip_count = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
-	Texture& texture = d3d.textures[handle.value];
+	Texture& texture = *handle;
 	texture.flags = flags;
 	texture.w = hdr.dwWidth;
 	texture.h = hdr.dwHeight;
-	
+	#ifdef LUMIX_DEBUG
+		texture.name = debug_name;
+	#endif
+
 	D3D11_SUBRESOURCE_DATA* srd = (D3D11_SUBRESOURCE_DATA*)_alloca(sizeof(D3D11_SUBRESOURCE_DATA) * mip_count * layers * (is_cubemap ? 6 : 1));
 	u32 srd_idx = 0;
 	for(int side = 0; side < (is_cubemap ? 6 : 1); ++side) {
@@ -1422,6 +1356,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 
 bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, u32 flags, const void* data, const char* debug_name)
 {
+	ASSERT(handle);
 	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
 	const bool no_mips = flags & (u32)TextureFlags::NO_MIPS;
 	const bool readback = flags & (u32)TextureFlags::READBACK;
@@ -1449,11 +1384,14 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	}
 
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
-	Texture& texture = d3d.textures[handle.value];
+	Texture& texture = *handle;
 	texture.flags = flags;
 	texture.sampler = getSampler(flags);
 	texture.w = w;
 	texture.h = h;
+	#ifdef LUMIX_DEBUG
+		texture.name = debug_name;
+	#endif
 
 	D3D11_TEXTURE3D_DESC desc_3d = {};
 	D3D11_TEXTURE2D_DESC desc_2d = {};
@@ -1564,10 +1502,18 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			d3d.device->CreateTexture2D(&desc_2d, nullptr, &texture.texture2D);
 		}
 	}
-	ASSERT(texture.texture2D);
 
-	if(debug_name && debug_name[0]) {
-		texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
+	if (is_3d) {
+		ASSERT(texture.texture3D);
+		if(debug_name && debug_name[0]) {
+			texture.texture3D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
+		}
+	}
+	else {
+		ASSERT(texture.texture2D);
+		if(debug_name && debug_name[0]) {
+			texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
+		}
 	}
 
 	if (compute_write) {
@@ -1578,13 +1524,14 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			uav_desc.Texture3D.MipSlice = 0;
 			uav_desc.Texture3D.WSize = -1;
 			uav_desc.Texture3D.FirstWSlice = 0;
+			d3d.device->CreateUnorderedAccessView(texture.texture3D, &uav_desc, &texture.uav);
 		}
 		else {
 			uav_desc.Format = texture.dxgi_format;
 			uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 			uav_desc.Texture2D.MipSlice = 0;
+			d3d.device->CreateUnorderedAccessView(texture.texture2D, &uav_desc, &texture.uav);
 		}
-		d3d.device->CreateUnorderedAccessView(texture.texture2D, &uav_desc, &texture.uav);
 	}
 
 	if (!readback) {
@@ -1763,15 +1710,15 @@ void viewport(u32 x, u32 y, u32 w, u32 h)
 	d3d.device_ctx->RSSetViewports(1, &vp);
 }
 
-void useProgram(ProgramHandle handle)
+void useProgram(ProgramHandle program)
 {
-	if(handle.isValid()) {
-		Program& program = d3d.programs[handle.value];
-		d3d.device_ctx->VSSetShader(program.vs, nullptr, 0);
-		d3d.device_ctx->PSSetShader(program.ps, nullptr, 0);
-		d3d.device_ctx->GSSetShader(program.gs, nullptr, 0);
-		d3d.device_ctx->CSSetShader(program.cs, nullptr, 0);
-		d3d.device_ctx->IASetInputLayout(program.il);
+	d3d.current_program = program;
+	if (program) {
+		d3d.device_ctx->VSSetShader(program->vs, nullptr, 0);
+		d3d.device_ctx->PSSetShader(program->ps, nullptr, 0);
+		d3d.device_ctx->GSSetShader(program->gs, nullptr, 0);
+		d3d.device_ctx->CSSetShader(program->cs, nullptr, 0);
+		d3d.device_ctx->IASetInputLayout(program->il);
 	}
 	else {
 		d3d.device_ctx->VSSetShader(nullptr, nullptr, 0);
@@ -1797,7 +1744,8 @@ void drawTriangles(u32 indices_count, DataType index_type) {
 		case DataType::U16: dxgi_index_type = DXGI_FORMAT_R16_UINT; break;
 	}
 
-	ID3D11Buffer* b = d3d.buffers[d3d.current_index_buffer.value].buffer;
+	ASSERT(d3d.current_index_buffer);
+	ID3D11Buffer* b = d3d.current_index_buffer->buffer;
 	d3d.device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
 	d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	d3d.device_ctx->DrawIndexed(indices_count, 0, 0);
@@ -1843,20 +1791,13 @@ TextureInfo getTextureInfo(const void* data)
 
 void destroy(BufferHandle buffer) {
 	checkThread();
-	
-	Buffer& t = d3d.buffers[buffer.value];
-	t.buffer->Release();
-	if (t.srv) t.srv->Release();
-	if (t.uav) t.uav->Release();
-
-	MutexGuard lock(d3d.handle_mutex);
-	d3d.buffers.dealloc(buffer.value);
+	LUMIX_DELETE(*d3d.allocator, buffer);
 }
 
 void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags)
 {
-	if(buffer.isValid()) {
-		Buffer& b = d3d.buffers[buffer.value];
+	if(buffer) {
+		Buffer& b = *buffer;
 		ASSERT(b.srv);
 		if (b.uav) {
 			if (flags & (u32)BindShaderBufferFlags::OUTPUT) {
@@ -1882,7 +1823,8 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags)
 }
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
-	ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
+	ASSERT(buffer);
+	ID3D11Buffer* b = buffer->buffer;
 	ASSERT(offset % 16 == 0);
 	const UINT first = (UINT)offset / 16;
 	const UINT num = ((UINT)size + 255) / 256 * 16;
@@ -1898,8 +1840,11 @@ void drawIndirect(DataType index_type) {
 		case DataType::U16: dxgi_index_type = DXGI_FORMAT_R16_UINT; break;
 	}
 
-	ID3D11Buffer* index_b = d3d.buffers[d3d.current_index_buffer.value].buffer;
-	ID3D11Buffer* indirect_b = d3d.buffers[d3d.current_indirect_buffer.value].buffer;
+	ASSERT(d3d.current_index_buffer);
+	ASSERT(d3d.current_indirect_buffer);
+	
+	ID3D11Buffer* index_b = d3d.current_index_buffer->buffer;
+	ID3D11Buffer* indirect_b = d3d.current_indirect_buffer->buffer;
 	d3d.device_ctx->IASetIndexBuffer(index_b, dxgi_index_type, 0);
 	d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	d3d.device_ctx->DrawIndexedInstancedIndirect(indirect_b, 0);
@@ -1918,8 +1863,8 @@ void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
 }
 
 void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride_offset) {
-	if(buffer.isValid()) {
-		ID3D11Buffer* b = d3d.buffers[buffer.value].buffer;
+	if(buffer) {
+		ID3D11Buffer* b = buffer->buffer;
 		d3d.device_ctx->IASetVertexBuffers(binding_idx, 1, &b, &stride_offset, &buffer_offset);
 	}
 	else {
@@ -1931,8 +1876,8 @@ void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u
 
 void bindImageTexture(TextureHandle handle, u32 unit) {
 	
-	if (handle.isValid()) {
-		Texture& texture = d3d.textures[handle.value];
+	if (handle) {
+		Texture& texture = *handle;
 		texture.bound_to_output = unit;
 		d3d.device_ctx->CSSetUnorderedAccessViews(unit, 1, &texture.uav, nullptr);
 		d3d.bound_image_textures[unit] = handle;
@@ -1948,11 +1893,13 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	ID3D11ShaderResourceView* views[16];
 	ID3D11SamplerState* samplers[16];
 	for (u32 i = 0; i < count; ++i) {
-		if (handles[i].isValid()) {
-			const Texture& texture = d3d.textures[handles[i].value];
+		d3d.bound_textures[offset + i] = handles[i];
+		if (handles[i]) {
+			Texture& texture = *handles[i];
 			views[i] = texture.srv;
 			samplers[i] = texture.sampler;
-			if (texture.bound_to_output != 0xffFFffFF && d3d.bound_image_textures[texture.bound_to_output].value == handles[i].value) {
+			texture.bound_to_input = i;
+			if (texture.bound_to_output != 0xffFFffFF && d3d.bound_image_textures[texture.bound_to_output] == handles[i]) {
 				ID3D11UnorderedAccessView* uav = nullptr;
 				d3d.device_ctx->CSSetUnorderedAccessViews(texture.bound_to_output, 1, &uav, nullptr);
 			
@@ -1972,19 +1919,21 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 }
 
 void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
+	ASSERT(d3d.current_index_buffer);
 	DXGI_FORMAT dxgi_index_type;
 	switch(index_type) {
 		case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; break;
 		case DataType::U16: dxgi_index_type = DXGI_FORMAT_R16_UINT; break;
 	}
 
-	ID3D11Buffer* b = d3d.buffers[d3d.current_index_buffer.value].buffer;
+	ID3D11Buffer* b = d3d.current_index_buffer->buffer;
 	d3d.device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
 	d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	d3d.device_ctx->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
 
 void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType index_type) {
+	ASSERT(d3d.current_index_buffer);
 	D3D11_PRIMITIVE_TOPOLOGY pt;
 	switch (primitive_type) {
 		case PrimitiveType::TRIANGLES: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
@@ -2002,37 +1951,37 @@ void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType 
 	}
 
 	ASSERT((offset & (offset_shift - 1)) == 0);
-	ID3D11Buffer* b = d3d.buffers[d3d.current_index_buffer.value].buffer;
+	ID3D11Buffer* b = d3d.current_index_buffer->buffer;
 	d3d.device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
 	d3d.device_ctx->IASetPrimitiveTopology(pt);
 	d3d.device_ctx->DrawIndexed(count, offset >> offset_shift, 0);
 }
 
 void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size) {
-	const Buffer& bdst = d3d.buffers[dst.value];
-	const Buffer& bsrc = d3d.buffers[src.value];
-	ASSERT(!bdst.mapped_ptr);
-	ASSERT(!bsrc.mapped_ptr);
+	ASSERT(dst);
+	ASSERT(src);
+	ASSERT(!dst->mapped_ptr);
+	ASSERT(!src->mapped_ptr);
 	D3D11_BOX src_box = {};
 	src_box.right = size;
 	src_box.bottom = 1;
 	src_box.back = 1;
-	d3d.device_ctx->CopySubresourceRegion(bdst.buffer, 0, dst_offset, 0, 0, bsrc.buffer, 0, &src_box);
+	d3d.device_ctx->CopySubresourceRegion(dst->buffer, 0, dst_offset, 0, 0, src->buffer, 0, &src_box);
 }
 
 void update(BufferHandle buffer, const void* data, size_t size) {
 	checkThread();
-	
-	const Buffer& b = d3d.buffers[buffer.value];
-	ASSERT(!b.mapped_ptr);
-	if (b.uav) {
-		d3d.device_ctx->UpdateSubresource1(b.buffer, 0, nullptr, data, (UINT)size, (UINT)size, D3D11_COPY_DISCARD);
+	ASSERT(buffer);
+	ASSERT(!buffer->mapped_ptr);
+
+	if (buffer->uav) {
+		d3d.device_ctx->UpdateSubresource1(buffer->buffer, 0, nullptr, data, (UINT)size, (UINT)size, D3D11_COPY_DISCARD);
 	}
 	else {
 		D3D11_MAPPED_SUBRESOURCE msr;
-		d3d.device_ctx->Map(b.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
+		d3d.device_ctx->Map(buffer->buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &msr);
 		memcpy((u8*)msr.pData, data, size);
-		d3d.device_ctx->Unmap(b.buffer, 0);
+		d3d.device_ctx->Unmap(buffer->buffer, 0);
 	}
 }
 
@@ -2229,8 +2178,12 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 
 bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name)
 {
-	Program& program = d3d.programs[handle.value];
+	ASSERT(handle);
+	Program& program = *handle;
 	program = {};
+	#ifdef LUMIX_DEBUG
+		program.name = name;
+	#endif
 	void* vs_bytecode = nullptr;
 	size_t vs_bytecode_len = 0;
 	

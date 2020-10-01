@@ -435,11 +435,8 @@ template <typename T, int C> struct StaticArray {
 };
 
 struct SRV {
-	bool is_buffer;
-	union {
-		TextureHandle texture;
-		BufferHandle buffer;
-	};
+	TextureHandle texture;
+	BufferHandle buffer;
 };
 
 static struct D3D {
@@ -485,7 +482,6 @@ static struct D3D {
 	SRV current_images[10];
 	u64 current_state = 0;
 	HashMap<u32, ID3D12PipelineState*> pipelines;
-	Mutex handle_mutex;
 	Window windows[64];
 	Window* current_window = windows;
 	FrameBuffer current_framebuffer;
@@ -505,9 +501,9 @@ static struct D3D {
 static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const SRV* srvs, u32 count) {
 	u32 flags[16];
 	for (u32 i = 0; i < count; ++i) {
-		if (!srvs[i].is_buffer && srvs[i].texture.isValid()) {
-			ASSERT(srvs[i].texture.value);
-			flags[i] = srvs[i].texture.value->flags;
+		if (srvs[i].texture) {
+			ASSERT(srvs[i].texture);
+			flags[i] = srvs[i].texture->flags;
 		} else {
 			flags[i] = 0;
 		}
@@ -532,10 +528,10 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const S
 	heap.count += count;
 
 	for (u32 i = 0; i < count; ++i) {
-		if (!srvs[i].is_buffer && srvs[i].texture.isValid()) {
+		if (srvs[i].texture) {
 			D3D12_SAMPLER_DESC desc = {};
-			ASSERT(srvs[i].texture.value);
-			const Texture& t = *srvs[i].texture.value;
+			ASSERT(srvs[i].texture);
+			const Texture& t = *srvs[i].texture;
 			desc.AddressU = (t.flags & (u32)TextureFlags::CLAMP_U) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			desc.AddressV = (t.flags & (u32)TextureFlags::CLAMP_V) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			desc.AddressW = (t.flags & (u32)TextureFlags::CLAMP_W) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -559,23 +555,15 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const S
 static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(HeapAllocator& heap, const SRV* srvs, u32 count) {
 	D3D12_GPU_DESCRIPTOR_HANDLE res = heap.getGPU();
 	for (u32 i = 0; i < count; ++i) {
-		if (srvs[i].is_buffer) {
-			if (srvs[i].buffer.isValid()) {
-				const Buffer* b = srvs[i].buffer.value;
-				if (b)
-					heap.copy(d3d.device, b->heap_id);
-				else
-					heap.copy(d3d.device, 1);
-			}
-		} else {
-			if (srvs[i].texture.isValid()) {
-				ASSERT(srvs[i].texture.value);
-				const Texture& t = *srvs[i].texture.value;
-				if (t.resource)
-					heap.copy(d3d.device, t.heap_id);
-				else
-					heap.copy(d3d.device, 0);
-			}
+		if (srvs[i].buffer) {
+			const Buffer* b = srvs[i].buffer;
+			heap.copy(d3d.device, b->resource ? b->heap_id : 1);
+		} else if (srvs[i].texture) {
+			const Texture& t = *srvs[i].texture;
+			heap.copy(d3d.device, t.resource ? t.heap_id : 0);
+		}
+		else {
+			heap.copy(d3d.device, 0);
 		}
 	}
 	return res;
@@ -738,23 +726,22 @@ void checkThread() {
 void destroy(ProgramHandle program) {
 	checkThread();
 
-	ASSERT(program.value);
-	Program& p = *program.value;
+	ASSERT(program);
+	Program& p = *program;
 	if (p.gs) d3d.frame->to_release.push(p.gs);
 	if (p.ps) d3d.frame->to_release.push(p.ps);
 	if (p.vs) d3d.frame->to_release.push(p.vs);
 	if (p.cs) d3d.frame->to_release.push(p.cs);
 
-	d3d.static_allocator.deallocate(program.value);
+	LUMIX_DELETE(*d3d.allocator, program);
 }
 
 void destroy(TextureHandle texture) {
 	checkThread();
-	ASSERT(texture.value);
-	Texture& t = *texture.value;
+	ASSERT(texture);
+	Texture& t = *texture;
 	if (t.resource) d3d.frame->to_release.push(t.resource);
-	t = {};
-	d3d.static_allocator.deallocate(&t);
+	LUMIX_DELETE(*d3d.allocator, texture);
 }
 
 void destroy(QueryHandle query) {
@@ -1162,11 +1149,11 @@ bool init(void* hwnd, u32 flags) {
 
 	for (SRV& h : d3d.current_srvs) {
 		h.texture = INVALID_TEXTURE;
-		h.is_buffer = false;
+		h.buffer = INVALID_BUFFER;
 	}
 	for (SRV& h : d3d.current_images) {
 		h.texture = INVALID_TEXTURE;
-		h.is_buffer = false;
+		h.buffer = INVALID_BUFFER;
 	}
 	for (TextureHandle& h : d3d.current_framebuffer.attachments) h = INVALID_TEXTURE;
 
@@ -1228,11 +1215,8 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip) {
 void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 	checkThread();
 
-	for (TextureHandle& handle : d3d.current_framebuffer.attachments) {
-		if (!handle.isValid()) continue;
-		ASSERT(handle.value);
-		Texture& t = *handle.value;
-		t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
+	for (TextureHandle& texture : d3d.current_framebuffer.attachments) {
+		if (texture) texture->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
 	}
 
 	const bool readonly_ds = flags & (u32)FramebufferFlags::READONLY_DEPTH_STENCIL;
@@ -1248,8 +1232,8 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 		d3d.current_framebuffer.ds_format = DXGI_FORMAT_UNKNOWN;
 		for (u32 i = 0; i < num; ++i) {
 			d3d.current_framebuffer.attachments[i] = attachments[i];
-			ASSERT(attachments[i].value);
-			Texture& t = *attachments[i].value;
+			ASSERT(attachments[i]);
+			Texture& t = *attachments[i];
 			if (isDepthFormat(t.dxgi_format)) {
 				t.setState(d3d.cmd_list, readonly_ds ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE);
 				d3d.current_framebuffer.depth_stencil = allocDSV(d3d.ds_heap, t);
@@ -1286,24 +1270,22 @@ void clear(u32 flags, const float* color, float depth) {
 	}
 }
 
-void* map(BufferHandle handle, size_t size) {
-	ASSERT(handle.value);
-	Buffer& buffer = *handle.value;
-	ASSERT(!buffer.mapped_ptr);
+void* map(BufferHandle buffer, size_t size) {
+	ASSERT(buffer);
+	ASSERT(!buffer->mapped_ptr);
 	D3D12_RANGE range = {};
-	HRESULT hr = buffer.resource->Map(0, &range, (void**)&buffer.mapped_ptr);
+	HRESULT hr = buffer->resource->Map(0, &range, (void**)&buffer->mapped_ptr);
 	ASSERT(hr == S_OK);
-	ASSERT(buffer.mapped_ptr);
-	return buffer.mapped_ptr;
+	ASSERT(buffer->mapped_ptr);
+	return buffer->mapped_ptr;
 }
 
-void unmap(BufferHandle handle) {
-	ASSERT(handle.value);
-	Buffer& buffer = *handle.value;
-	ASSERT(buffer.mapped_ptr);
+void unmap(BufferHandle buffer) {
+	ASSERT(buffer);
+	ASSERT(buffer->mapped_ptr);
 	D3D12_RANGE range = {};
-	buffer.resource->Unmap(0, &range);
-	buffer.mapped_ptr = nullptr;
+	buffer->resource->Unmap(0, &range);
+	buffer->mapped_ptr = nullptr;
 }
 
 bool getMemoryStats(Ref<MemoryStats> stats) {
@@ -1368,11 +1350,11 @@ u32 swapBuffers() {
 	d3d.frame->begin();
 	for (SRV& h : d3d.current_srvs) {
 		h.texture = INVALID_TEXTURE;
-		h.is_buffer = false;
+		h.buffer = INVALID_BUFFER;
 	}
 	for (SRV& h : d3d.current_images) {
 		h.texture = INVALID_TEXTURE;
-		h.is_buffer = false;
+		h.buffer = INVALID_BUFFER;
 	}
 	for (TextureHandle& h : d3d.current_framebuffer.attachments) h = INVALID_TEXTURE;
 
@@ -1425,11 +1407,10 @@ u32 swapBuffers() {
 	return res;
 }
 
-void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data) {
-	ASSERT(handle.value);
-	Buffer& buffer = *handle.value;
-	ASSERT(!buffer.resource);
-	buffer.size = size;
+void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data) {
+	ASSERT(buffer);
+	ASSERT(!buffer->resource);
+	buffer->size = size;
 	const bool mappable = flags & (u32)BufferFlags::MAPPABLE;
 
 	D3D12_HEAP_PROPERTIES props;
@@ -1454,9 +1435,9 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 		size = ((size + 15) / 16) * 16;
 	}
 
-	HRESULT hr = d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, IID_PPV_ARGS(&buffer.resource));
+	HRESULT hr = d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, IID_PPV_ARGS(&buffer->resource));
 	ASSERT(hr == S_OK);
-	buffer.state = D3D12_RESOURCE_STATE_GENERIC_READ;
+	buffer->state = D3D12_RESOURCE_STATE_GENERIC_READ;
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 	srv_desc = {};
@@ -1468,13 +1449,13 @@ void createBuffer(BufferHandle handle, u32 flags, size_t size, const void* data)
 	srv_desc.Buffer.StructureByteStride = 0;
 	srv_desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
-	buffer.heap_id = d3d.srv_heap.alloc(d3d.device, buffer.resource, srv_desc);
+	buffer->heap_id = d3d.srv_heap.alloc(d3d.device, buffer->resource, srv_desc);
 
 	if (data) {
 		ID3D12Resource* upload_buffer = createUploadBuffer(d3d.device, data, size);
-		D3D12_RESOURCE_STATES old_state = buffer.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
-		d3d.cmd_list->CopyResource(buffer.resource, upload_buffer);
-		buffer.setState(d3d.cmd_list, old_state);
+		D3D12_RESOURCE_STATES old_state = buffer->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
+		d3d.cmd_list->CopyResource(buffer->resource, upload_buffer);
+		buffer->setState(d3d.cmd_list, old_state);
 		d3d.frame->to_release.push(upload_buffer);
 	}
 }
@@ -1486,15 +1467,11 @@ ProgramHandle allocProgramHandle() {
 }
 
 BufferHandle allocBufferHandle() {
-	void* mem = d3d.static_allocator.allocate(sizeof(Buffer));
-	Buffer* buffer = new (NewPlaceholder(), mem) Buffer();
-	return {buffer};
+	return LUMIX_NEW(*d3d.allocator, Buffer);
 }
 
 TextureHandle allocTextureHandle() {
-	void* mem = d3d.static_allocator.allocate(sizeof(Texture));
-	Texture* texture = new (NewPlaceholder(), mem) Texture();
-	return {texture};
+	return LUMIX_NEW(*d3d.allocator, Texture);
 }
 
 void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, AttributeType type, u8 flags) {
@@ -1516,6 +1493,7 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, const char* debug_name) {
 	checkThread();
 	ASSERT(debug_name && debug_name[0]);
+	ASSERT(handle);
 	DDS::Header hdr;
 
 	InputMemoryStream blob(data, size);
@@ -1563,22 +1541,14 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
 	const DXGI_FORMAT internal_format = is_srgb ? li->srgb_format : li->format;
 	const u32 mip_count = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
-	ASSERT(handle.value);
-	Texture& texture = *handle.value;
+	Texture& texture = *handle;
 	texture.flags = flags;
-	// texture.w = hdr.dwWidth;
-	// texture.h = hdr.dwHeight;
 
 	D3D12_SUBRESOURCE_DATA* srd = (D3D12_SUBRESOURCE_DATA*)_alloca(sizeof(D3D12_SUBRESOURCE_DATA) * mip_count * layers * (is_cubemap ? 6 : 1));
 	u32 srd_idx = 0;
 	for (int side = 0; side < (is_cubemap ? 6 : 1); ++side) {
 		for (int layer = 0; layer < layers; ++layer) {
-			// const GLenum tex_img_target =  is_cubemap ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + side : layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
-
 			if (li->compressed) {
-				/*if (size != hdr.dwPitchOrLinearSize || (hdr.dwFlags &	 DDS::DDSD_LINEARSIZE) == 0) { 				CHECK_GL(glDeleteTextures(1, &texture));
-					return false;
-				}*/
 				for (u32 mip = 0; mip < mip_count; ++mip) {
 					const u32 width = maximum(1, hdr.dwWidth >> mip);
 					const u32 height = maximum(1, hdr.dwHeight >> mip);
@@ -1687,6 +1657,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 }
 
 bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, u32 flags, const void* data, const char* debug_name) {
+	ASSERT(handle);
+
 	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
 	const bool no_mips = flags & (u32)TextureFlags::NO_MIPS;
 	const bool readback = flags & (u32)TextureFlags::READBACK;
@@ -1715,8 +1687,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	}
 
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
-	ASSERT(handle.value);
-	Texture& texture = *handle.value;
+	Texture& texture = *handle;
 
 	D3D12_HEAP_PROPERTIES props = {};
 	props.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1878,8 +1849,8 @@ void scissor(u32 x, u32 y, u32 w, u32 h) {
 }
 
 static ID3D12PipelineState* getPipelineStateCompute() {
-	ASSERT(d3d.current_program.value);
-	Program& p = *d3d.current_program.value;
+	ASSERT(d3d.current_program);
+	Program& p = *d3d.current_program;
 	D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
 	desc.CS = {p.cs->GetBufferPointer(), p.cs->GetBufferSize()};
 	desc.NodeMask = 1;
@@ -1887,12 +1858,10 @@ static ID3D12PipelineState* getPipelineStateCompute() {
 	desc.pRootSignature = d3d.root_signature;
 
 	u32 hash = crc32(&desc, sizeof(desc));
-	hash = continueCrc32(hash, &d3d.current_program.value, sizeof(d3d.current_program.value));
+	hash = continueCrc32(hash, &d3d.current_program, sizeof(d3d.current_program));
 
 	auto iter = d3d.pipelines.find(hash);
-	if (iter.isValid()) {
-		return iter.value();
-	}
+	if (iter.isValid()) return iter.value();
 
 	ID3D12PipelineState* pso;
 	HRESULT hr = d3d.device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso));
@@ -1902,8 +1871,8 @@ static ID3D12PipelineState* getPipelineStateCompute() {
 }
 
 static ID3D12PipelineState* getPipelineState(D3D12_PRIMITIVE_TOPOLOGY_TYPE pt) {
-	ASSERT(d3d.current_program.value);
-	Program& p = *d3d.current_program.value;
+	ASSERT(d3d.current_program);
+	Program& p = *d3d.current_program;
 	u64 state = d3d.current_state;
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
 	if (p.vs) desc.VS = {p.vs->GetBufferPointer(), p.vs->GetBufferSize()};
@@ -2034,12 +2003,10 @@ static ID3D12PipelineState* getPipelineState(D3D12_PRIMITIVE_TOPOLOGY_TYPE pt) {
 	}
 
 	u32 hash = crc32(&desc, sizeof(desc));
-	hash = continueCrc32(hash, &d3d.current_program.value, sizeof(d3d.current_program.value));
+	hash = continueCrc32(hash, &d3d.current_program, sizeof(d3d.current_program));
 
 	auto iter = d3d.pipelines.find(hash);
-	if (iter.isValid()) {
-		return iter.value();
-	}
+	if (iter.isValid()) return iter.value();
 
 	ID3D12PipelineState* pso;
 	HRESULT hr = d3d.device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso));
@@ -2113,24 +2080,22 @@ TextureInfo getTextureInfo(const void* data) {
 
 void destroy(BufferHandle buffer) {
 	checkThread();
-
-	ASSERT(buffer.value);
-	Buffer& t = *buffer.value;
+	ASSERT(buffer);
+	Buffer& t = *buffer;
 	if (t.resource) d3d.frame->to_release.push(t.resource);
 
-	d3d.static_allocator.deallocate(&t);
+	LUMIX_DELETE(*d3d.allocator, buffer);
 }
 
 void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags) {
 	ASSERT(binding_point < 10);
-	d3d.current_srvs[binding_point].is_buffer = true;
+	d3d.current_srvs[binding_point].texture = INVALID_TEXTURE;
 	d3d.current_srvs[binding_point].buffer = buffer;
 }
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
-	if (buffer.isValid()) {
-		ASSERT(buffer.value);
-		ID3D12Resource* b = buffer.value->resource;
+	if (buffer) {
+		ID3D12Resource* b = buffer->resource;
 		ASSERT(b);
 		d3d.cmd_list->SetGraphicsRootConstantBufferView(index, b->GetGPUVirtualAddress() + offset);
 		d3d.cmd_list->SetComputeRootConstantBufferView(index, b->GetGPUVirtualAddress() + offset);
@@ -2178,12 +2143,11 @@ void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
 }
 
 void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride_in_bytes) {
-	if (buffer.isValid()) {
-		Buffer& b = *buffer.value;
+	if (buffer) {
 		D3D12_VERTEX_BUFFER_VIEW vbv;
-		vbv.BufferLocation = b.resource->GetGPUVirtualAddress() + buffer_offset;
+		vbv.BufferLocation = buffer->resource->GetGPUVirtualAddress() + buffer_offset;
 		vbv.StrideInBytes = stride_in_bytes;
-		vbv.SizeInBytes = UINT(b.size - buffer_offset);
+		vbv.SizeInBytes = UINT(buffer->size - buffer_offset);
 		d3d.cmd_list->IASetVertexBuffers(binding_idx, 1, &vbv);
 	} else {
 		D3D12_VERTEX_BUFFER_VIEW vbv = {};
@@ -2195,17 +2159,16 @@ void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u
 }
 
 void bindImageTexture(TextureHandle handle, u32 unit) {
-	d3d.current_images[unit].is_buffer = false;
+	d3d.current_images[unit].buffer = INVALID_BUFFER;
 	d3d.current_images[unit].texture = handle;
 }
 
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	for (u32 i = 0; i < count; ++i) {
-		d3d.current_srvs[i + offset].is_buffer = false;
+		d3d.current_srvs[i + offset].buffer = INVALID_BUFFER;
 		d3d.current_srvs[i + offset].texture = handles[i];
-		if (handles[i].isValid()) {
-			ASSERT(handles[i].value);
-			Texture& t = *handles[i].value;
+		if (handles[i]) {
+			Texture& t = *handles[i];
 			if (t.resource) {
 				// for (TextureHandle h : d3d.current_framebuffer.attachments) {
 				//	if (h.value == handles[i].value) goto next;
@@ -2239,8 +2202,8 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 			break;
 	}
 
-	ASSERT(d3d.current_index_buffer.value);
-	ID3D12Resource* b = d3d.current_index_buffer.value->resource;
+	ASSERT(d3d.current_index_buffer);
+	ID3D12Resource* b = d3d.current_index_buffer->resource;
 	D3D12_INDEX_BUFFER_VIEW ibv = {};
 	ibv.BufferLocation = b->GetGPUVirtualAddress();
 	ibv.Format = dxgi_index_type;
@@ -2296,8 +2259,8 @@ void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, Dat
 	}
 
 	ASSERT((offset_bytes & (offset_shift - 1)) == 0);
-	ASSERT(d3d.current_index_buffer.value);
-	ID3D12Resource* b = d3d.current_index_buffer.value->resource;
+	ASSERT(d3d.current_index_buffer);
+	ID3D12Resource* b = d3d.current_index_buffer->resource;
 	D3D12_INDEX_BUFFER_VIEW ibv = {};
 	ibv.BufferLocation = b->GetGPUVirtualAddress();
 	ibv.Format = dxgi_index_type;
@@ -2315,29 +2278,26 @@ void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, Dat
 }
 
 void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size) {
-	ASSERT(src.value);
-	ASSERT(dst.value);
-	Buffer& bdst = *dst.value;
-	const Buffer& bsrc = *src.value;
-	ASSERT(!bdst.mapped_ptr);
-	ASSERT(!bsrc.mapped_ptr);
-	D3D12_RESOURCE_STATES state = bdst.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
-	d3d.cmd_list->CopyBufferRegion(bdst.resource, dst_offset, bsrc.resource, 0, size);
-	bdst.setState(d3d.cmd_list, state);
+	ASSERT(src);
+	ASSERT(dst);
+	ASSERT(!dst->mapped_ptr);
+	ASSERT(!src->mapped_ptr);
+	D3D12_RESOURCE_STATES state = dst->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
+	d3d.cmd_list->CopyBufferRegion(dst->resource, dst_offset, src->resource, 0, size);
+	dst->setState(d3d.cmd_list, state);
 }
 
 void update(BufferHandle buffer, const void* data, size_t size) {
 	checkThread();
-	ASSERT(buffer.value);
-	Buffer& b = *buffer.value;
+	ASSERT(buffer);
 
 	u8* dst = d3d.frame->scratch_buffer_ptr;
 	ASSERT(size + dst <= d3d.frame->scratch_buffer_begin + SCRATCH_BUFFER_SIZE);
 	memcpy(dst, data, size);
 	UINT64 src_offset = dst - d3d.frame->scratch_buffer_begin;
-	D3D12_RESOURCE_STATES state = b.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
-	d3d.cmd_list->CopyBufferRegion(b.resource, 0, d3d.frame->scratch_buffer, src_offset, size);
-	b.setState(d3d.cmd_list, state);
+	D3D12_RESOURCE_STATES state = buffer->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
+	d3d.cmd_list->CopyBufferRegion(buffer->resource, 0, d3d.frame->scratch_buffer, src_offset, size);
+	buffer->setState(d3d.cmd_list, state);
 
 	d3d.frame->scratch_buffer_ptr += size;
 }
@@ -2535,9 +2495,8 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 }
 
 bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name) {
-	ASSERT(handle.value);
-	Program& program = *handle.value;
-	program = {};
+	ASSERT(handle);
+	Program& program = *handle;
 
 	void* vs_bytecode = nullptr;
 	size_t vs_bytecode_len = 0;

@@ -21,6 +21,8 @@ project "renderer"
 			defines { "LUMIX_DX12" }
 	else
 		excludes { "src/gpu_dx12.cpp" }
+		solution "LumixEngine"
+			defines { "LUMIX_DX11" }
 	end
 
 
