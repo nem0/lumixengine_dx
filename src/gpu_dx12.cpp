@@ -163,7 +163,7 @@ struct Buffer {
 
 	ID3D12Resource* resource = nullptr;
 	u8* mapped_ptr = nullptr;
-	size_t size = 0;
+	u32 size = 0;
 	D3D12_RESOURCE_STATES state;
 	u32 heap_id;
 };
@@ -182,6 +182,9 @@ struct Texture {
 	u32 heap_id;
 	DXGI_FORMAT dxgi_format;
 	u32 flags;
+	#ifdef LUMIX_DEBUG
+		StaticString<64> name;
+	#endif
 };
 
 struct SamplerAllocator {
@@ -224,13 +227,17 @@ struct HeapAllocator {
 		return res;
 	}
 
-	u32 alloc(ID3D12Device* device, ID3D12Resource* res, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc) {
+	u32 alloc(ID3D12Device* device, ID3D12Resource* res, const D3D12_SHADER_RESOURCE_VIEW_DESC& srv_desc, const D3D12_UNORDERED_ACCESS_VIEW_DESC* uav_desc) {
 		u32 id = free_list.back();
 		free_list.pop();
 
 		D3D12_CPU_DESCRIPTOR_HANDLE cpu = backing_heap->GetCPUDescriptorHandleForHeapStart();
 		cpu.ptr += id * increment;
-		device->CreateShaderResourceView(res, &desc, cpu);
+		device->CreateShaderResourceView(res, &srv_desc, cpu);
+		if (uav_desc) {
+			cpu.ptr += increment;
+			device->CreateUnorderedAccessView(res, nullptr, uav_desc, cpu);
+		}
 
 		return id;
 	}
@@ -256,7 +263,7 @@ struct HeapAllocator {
 
 	bool init(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 num_descriptors, u32 num_backing_descriptors) {
 		free_list.reserve(num_backing_descriptors);
-		for (u32 i = 2; i < num_backing_descriptors; ++i) {
+		for (u32 i = 2; i < num_backing_descriptors; i += 2) {
 			free_list.push(i);
 		}
 
@@ -328,8 +335,7 @@ static ID3D12Resource* createUploadBuffer(ID3D12Device* device, const void* data
 	upload_heap_props.CreationNodeMask = 1;
 	upload_heap_props.VisibleNodeMask = 1;
 
-	D3D12_RESOURCE_DESC desc;
-	memset(&desc, 0, sizeof(D3D12_RESOURCE_DESC));
+	D3D12_RESOURCE_DESC desc = {};
 	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 	desc.Width = size;
 	desc.Height = 1;
@@ -569,6 +575,23 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(HeapAllocator& heap, const SRV* srvs
 	return res;
 }
 
+static D3D12_GPU_DESCRIPTOR_HANDLE allocUAV(HeapAllocator& heap, const SRV* srvs, u32 count) {
+	D3D12_GPU_DESCRIPTOR_HANDLE res = heap.getGPU();
+	for (u32 i = 0; i < count; ++i) {
+		if (srvs[i].buffer) {
+			const Buffer* b = srvs[i].buffer;
+			heap.copy(d3d.device, b->resource ? b->heap_id + 1 : 1);
+		} else if (srvs[i].texture) {
+			const Texture& t = *srvs[i].texture;
+			heap.copy(d3d.device, t.resource ? t.heap_id + 1 : 0);
+		}
+		else {
+			heap.copy(d3d.device, 0);
+		}
+	}
+	return res;
+}
+
 static D3D12_CPU_DESCRIPTOR_HANDLE allocDSV(HeapAllocator& heap, const Texture& texture) {
 	ASSERT(heap.count + 1 <= heap.max_count);
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu = heap.gpu;
@@ -751,12 +774,6 @@ void destroy(QueryHandle query) {
 	//
 	// MutexGuard lock(d3d.handle_mutex);
 	// d3d.queries.dealloc(query.value);
-}
-
-void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
-	// d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	// d3d.device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
-	ASSERT(false); // TODO
 }
 
 void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) {
@@ -1086,6 +1103,10 @@ bool init(void* hwnd, u32 flags) {
 	if (debug) {
 		if (api_D3D12GetDebugInterface(IID_PPV_ARGS(&d3d.debug)) != S_OK) return false;
 		d3d.debug->EnableDebugLayer();
+
+		ID3D12Debug1* debug1;
+		d3d.debug->QueryInterface(IID_PPV_ARGS(&debug1));
+		debug1->SetEnableGPUBasedValidation(true);
 	}
 
 	D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_0;
@@ -1235,7 +1256,7 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 			ASSERT(attachments[i]);
 			Texture& t = *attachments[i];
 			if (isDepthFormat(t.dxgi_format)) {
-				t.setState(d3d.cmd_list, readonly_ds ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE);
+				t.setState(d3d.cmd_list, readonly_ds ? D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_DEPTH_WRITE);
 				d3d.current_framebuffer.depth_stencil = allocDSV(d3d.ds_heap, t);
 				d3d.current_framebuffer.ds_format = toDSViewFormat(t.dxgi_format);
 			} else {
@@ -1410,17 +1431,20 @@ u32 swapBuffers() {
 void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data) {
 	ASSERT(buffer);
 	ASSERT(!buffer->resource);
-	buffer->size = size;
+	ASSERT(size < UINT_MAX);
+	buffer->size = (u32)size;
 	const bool mappable = flags & (u32)BufferFlags::MAPPABLE;
+	const bool shader_buffer = flags & (u32)BufferFlags::SHADER_BUFFER;
+	if (shader_buffer) {
+		size = ((size + 15) / 16) * 16;
+	}	
 
-	D3D12_HEAP_PROPERTIES props;
-	memset(&props, 0, sizeof(D3D12_HEAP_PROPERTIES));
+	D3D12_HEAP_PROPERTIES props = {};
 	props.Type = mappable ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT;
 	props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 
-	D3D12_RESOURCE_DESC desc;
-	memset(&desc, 0, sizeof(D3D12_RESOURCE_DESC));
+	D3D12_RESOURCE_DESC desc = {};
 	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 	desc.Width = size;
 	desc.Height = 1;
@@ -1429,11 +1453,7 @@ void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 	desc.Format = DXGI_FORMAT_UNKNOWN;
 	desc.SampleDesc.Count = 1;
 	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-	desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-	if (flags & (u32)BufferFlags::SHADER_BUFFER) {
-		size = ((size + 15) / 16) * 16;
-	}
+	desc.Flags = shader_buffer ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
 
 	HRESULT hr = d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, IID_PPV_ARGS(&buffer->resource));
 	ASSERT(hr == S_OK);
@@ -1449,7 +1469,22 @@ void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 	srv_desc.Buffer.StructureByteStride = 0;
 	srv_desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
-	buffer->heap_id = d3d.srv_heap.alloc(d3d.device, buffer->resource, srv_desc);
+	if (shader_buffer) {
+		D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+		uav_desc.Format = DXGI_FORMAT_R32_UINT;
+		uav_desc.Buffer.CounterOffsetInBytes = 0;
+		uav_desc.Buffer.FirstElement = 0;
+		uav_desc.Buffer.NumElements = srv_desc.Buffer.NumElements;
+		uav_desc.Buffer.StructureByteStride = 0;
+		uav_desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+		buffer->heap_id = d3d.srv_heap.alloc(d3d.device, buffer->resource, srv_desc, &uav_desc);
+	}
+	else {
+		buffer->heap_id = d3d.srv_heap.alloc(d3d.device, buffer->resource, srv_desc, nullptr);
+	
+	}
 
 	if (data) {
 		ID3D12Resource* upload_buffer = createUploadBuffer(d3d.device, data, size);
@@ -1461,8 +1496,7 @@ void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 }
 
 ProgramHandle allocProgramHandle() {
-	void* mem = d3d.static_allocator.allocate(sizeof(Program));
-	Program* p = new (NewPlaceholder(), mem) Program();
+	Program* p = LUMIX_NEW(*d3d.allocator, Program);
 	return {p};
 }
 
@@ -1571,7 +1605,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	props.Type = D3D12_HEAP_TYPE_DEFAULT;
 	props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-	if (layers > 1) {
+	if (false) {
 		// D3D11_TEXTURE2D_DESC desc = {};
 		//
 		// desc.Width = maximum(li->block_width, hdr.dwWidth);
@@ -1616,13 +1650,34 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 
 		texture.dxgi_format = desc.Format;
 		D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+		D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
 		srv_desc.Format = toViewFormat(desc.Format);
+		uav_desc.Format = srv_desc.Format;
 		srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		if (is_cubemap) {
 			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
 			srv_desc.TextureCube.MipLevels = mip_count;
 			srv_desc.TextureCube.MostDetailedMip = 0;
 			srv_desc.TextureCube.ResourceMinLODClamp = 0;
+
+			uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+			uav_desc.Texture2D.MipSlice = 0;
+			uav_desc.Texture2D.PlaneSlice = 0;
+		}
+		else if (layers > 1) {
+			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+			srv_desc.Texture2DArray.ArraySize = layers;
+			srv_desc.Texture2DArray.FirstArraySlice = 0;
+			srv_desc.Texture2DArray.MipLevels = mip_count;
+			srv_desc.Texture2DArray.MostDetailedMip = 0;
+			srv_desc.Texture2DArray.PlaneSlice = 0;
+			srv_desc.Texture2DArray.ResourceMinLODClamp = 0;
+
+			uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+			uav_desc.Texture2DArray.ArraySize = layers;
+			uav_desc.Texture2DArray.FirstArraySlice = 0;
+			uav_desc.Texture2DArray.MipSlice = 0;
+			uav_desc.Texture2DArray.PlaneSlice = 0;
 		}
 		else {
 			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -1630,9 +1685,14 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 			srv_desc.Texture2D.MostDetailedMip = 0;
 			srv_desc.Texture2D.ResourceMinLODClamp = 0;
 			srv_desc.Texture2D.PlaneSlice = 0;
+
+			uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+			uav_desc.Texture2D.MipSlice = 0;
+			uav_desc.Texture2D.PlaneSlice = 0;
 		}
 
-		texture.heap_id = d3d.srv_heap.alloc(d3d.device, texture.resource, srv_desc);
+
+		texture.heap_id = d3d.srv_heap.alloc(d3d.device, texture.resource, srv_desc, nullptr);
 
 		u64 upload_buffer_size;
 		d3d.device->GetCopyableFootprints(&desc, 0, srd_idx, 0, NULL, NULL, NULL, &upload_buffer_size);
@@ -1704,6 +1764,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	desc.SampleDesc.Count = 1;
 	desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 	desc.Flags = render_target ? (isDepthFormat(desc.Format) ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL : D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) : D3D12_RESOURCE_FLAG_NONE;
+	if (compute_write) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
 	D3D12_CLEAR_VALUE clear_val = {};
 	D3D12_CLEAR_VALUE* clear_val_ptr = nullptr;
@@ -1723,28 +1784,43 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		}
 	}
 
-	if (d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, clear_val_ptr, IID_PPV_ARGS(&texture.resource)) != S_OK) return false;
+	texture.state = compute_write ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_GENERIC_READ;
+	if (d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, texture.state, clear_val_ptr, IID_PPV_ARGS(&texture.resource)) != S_OK) return false;
 
-	texture.state = D3D12_RESOURCE_STATE_GENERIC_READ;
+	#ifdef LUMIX_DEBUG
+		texture.name = debug_name;
+	#endif
+
 	texture.flags = flags;
 	texture.dxgi_format = desc.Format;
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+	D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
 	srv_desc.Format = toViewFormat(desc.Format);
+	uav_desc.Format = srv_desc.Format;
 	srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	if (is_3d) {
 		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
 		srv_desc.Texture3D.MipLevels = mip_count;
 		srv_desc.Texture3D.MostDetailedMip = 0;
 		srv_desc.Texture3D.ResourceMinLODClamp = 0;
+
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+		uav_desc.Texture3D.MipSlice = 0;
+		uav_desc.Texture3D.FirstWSlice = 0;
+		uav_desc.Texture3D.WSize = -1;
 	} else {
 		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srv_desc.Texture2D.MipLevels = mip_count;
 		srv_desc.Texture2D.MostDetailedMip = 0;
 		srv_desc.Texture2D.ResourceMinLODClamp = 0;
 		srv_desc.Texture2D.PlaneSlice = 0;
+
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+		uav_desc.Texture2D.MipSlice = 0;
+		uav_desc.Texture2D.PlaneSlice = 0;
 	}
 
-	texture.heap_id = d3d.srv_heap.alloc(d3d.device, texture.resource, srv_desc);
+	texture.heap_id = d3d.srv_heap.alloc(d3d.device, texture.resource, srv_desc, compute_write ? &uav_desc : nullptr);
 
 	if (debug_name) {
 		WCHAR tmp[MAX_PATH];
@@ -2106,22 +2182,6 @@ void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t siz
 	}
 }
 
-void drawIndirect(DataType index_type) {
-	// DXGI_FORMAT dxgi_index_type;
-	// switch(index_type) {
-	//	case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; break;
-	//	case DataType::U16: dxgi_index_type = DXGI_FORMAT_R16_UINT; break;
-	//}
-	//
-	// ID3D11Buffer* index_b =
-	// d3d.buffers[d3d.current_index_buffer.value].buffer; ID3D11Buffer*
-	// indirect_b = d3d.buffers[d3d.current_indirect_buffer.value].buffer;
-	// d3d.device_ctx->IASetIndexBuffer(index_b, dxgi_index_type, 0);
-	// d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	// d3d.device_ctx->DrawIndexedInstancedIndirect(indirect_b, 0);
-	ASSERT(false); // TODO
-}
-
 void bindIndirectBuffer(BufferHandle handle) {
 	d3d.current_indirect_buffer = handle;
 }
@@ -2134,7 +2194,7 @@ void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
 	d3d.cmd_list->SetPipelineState(getPipelineStateCompute());
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE uav = allocSRV(d3d.srv_heap, d3d.current_images, lengthOf(d3d.current_images));
+	D3D12_GPU_DESCRIPTOR_HANDLE uav = allocUAV(d3d.srv_heap, d3d.current_images, lengthOf(d3d.current_images));
 
 	d3d.cmd_list->SetComputeRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetComputeRootDescriptorTable(6, srv);
@@ -2161,6 +2221,9 @@ void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u
 void bindImageTexture(TextureHandle handle, u32 unit) {
 	d3d.current_images[unit].buffer = INVALID_BUFFER;
 	d3d.current_images[unit].texture = handle;
+	if (handle) {
+		handle->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	}
 }
 
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
@@ -2170,18 +2233,79 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 		if (handles[i]) {
 			Texture& t = *handles[i];
 			if (t.resource) {
-				// for (TextureHandle h : d3d.current_framebuffer.attachments) {
-				//	if (h.value == handles[i].value) goto next;
-				//}
 				if (t.state == D3D12_RESOURCE_STATE_DEPTH_WRITE)
-					t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_DEPTH_READ);
-				else if (t.state == D3D12_RESOURCE_STATE_DEPTH_READ) {
+					t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				else if (t.state & D3D12_RESOURCE_STATE_DEPTH_READ) {
 				} else if (t.state != D3D12_RESOURCE_STATE_GENERIC_READ)
 					t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
 			}
 		}
-		// next : {}
 	}
+}
+
+void drawIndirect(DataType index_type) {
+	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
+
+	DXGI_FORMAT dxgi_index_type;
+	u32 offset_shift = 0;
+	switch (index_type) {
+		case DataType::U32:
+			dxgi_index_type = DXGI_FORMAT_R32_UINT;
+			offset_shift = 2;
+			break;
+		case DataType::U16:
+			dxgi_index_type = DXGI_FORMAT_R16_UINT;
+			offset_shift = 1;
+			break;
+	}
+
+	ASSERT(d3d.current_index_buffer);
+	ID3D12Resource* b = d3d.current_index_buffer->resource;
+	D3D12_INDEX_BUFFER_VIEW ibv = {};
+	ibv.BufferLocation = b->GetGPUVirtualAddress();
+	ibv.Format = dxgi_index_type;
+	ibv.SizeInBytes = d3d.current_index_buffer->size;
+	d3d.cmd_list->IASetIndexBuffer(&ibv);
+	d3d.cmd_list->IASetPrimitiveTopology(pt);
+
+	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+
+	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+
+	static ID3D12CommandSignature* signature = [&]() {
+		D3D12_INDIRECT_ARGUMENT_DESC arg_desc = {};
+		arg_desc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+
+		D3D12_COMMAND_SIGNATURE_DESC desc = {};
+		desc.NodeMask = 1;
+		desc.ByteStride = sizeof(u32) * 5;
+		desc.NumArgumentDescs = 1;
+		desc.pArgumentDescs = &arg_desc;
+		ID3D12CommandSignature* signature;
+		d3d.device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&signature));
+		return signature;
+	}();
+
+	d3d.cmd_list->ExecuteIndirect(signature, 1, d3d.current_indirect_buffer->resource, 0, nullptr, 0);
+}
+
+void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
+	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
+	d3d.cmd_list->IASetPrimitiveTopology(pt);
+
+	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+
+	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+
+	d3d.cmd_list->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
 void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
