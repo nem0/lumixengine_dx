@@ -141,6 +141,7 @@ struct Buffer {
 	ID3D11UnorderedAccessView* uav = nullptr;
 	u8* mapped_ptr = nullptr;
 	bool is_constant_buffer = false;
+	u32 bound_to_output = 0; 
 };
 
 struct Texture {
@@ -218,6 +219,7 @@ static struct D3D {
 	ID3D11DeviceContext1* device_ctx = nullptr;
 	TextureHandle bound_image_textures[16];
 	TextureHandle bound_textures[16];
+	void* bound_uavs[16];
 	ID3D11Device* device = nullptr;
 	ID3DUserDefinedAnnotation* annotation = nullptr;
 	ID3D11Query* disjoint_query = nullptr;
@@ -704,7 +706,7 @@ bool init(void* hwnd, u32 flags) {
 			if (SUCCEEDED(hr)) {
 				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_ERROR, true);
 				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_CORRUPTION, true);
-				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, true);
+				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, false);
 				info_queue->Release();
 			}
 			d3d_debug->Release();
@@ -792,17 +794,18 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
 }
 
 // TODO texture might get destroyed while framebuffer has rtv or dsv to it
-void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
+void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, u32 flags) {
+	ASSERT(num < (u32)lengthOf(d3d.current_framebuffer.render_targets));
 	checkThread();
+
 	const bool readonly_ds = flags & (u32)FramebufferFlags::READONLY_DEPTH_STENCIL;
-	if (!attachments) {
+	if (!attachments && !ds) {
 		d3d.current_framebuffer = d3d.current_window->framebuffer;
 		d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
 		return;
 	}
 
-	d3d.current_framebuffer.count = 0;
-	d3d.current_framebuffer.depth_stencil = nullptr;
+	d3d.current_framebuffer.count = num;
 	for(u32 i = 0; i < num; ++i) {
 		ASSERT(attachments[i]);
 		Texture& t = *attachments[i];
@@ -815,37 +818,37 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 			t.bound_to_input = 0xffFFffFF;
 		}
 
-		if (isDepthFormat(t.dxgi_format)) {
-			ASSERT(!d3d.current_framebuffer.depth_stencil);
-			if(readonly_ds && !t.dsv_ro) {
-				D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
-				desc.Format = toDSViewFormat(t.dxgi_format);
-				desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-				desc.Texture2D.MipSlice = 0;
-				desc.Flags = D3D11_DSV_READ_ONLY_DEPTH;
-				d3d.device->CreateDepthStencilView((ID3D11Resource*)t.texture2D, &desc, &t.dsv_ro);
-			}
-			else if(!t.dsv) {
-				D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
-				desc.Format = toDSViewFormat(t.dxgi_format);
-				desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-				desc.Texture2D.MipSlice = 0;
-				d3d.device->CreateDepthStencilView((ID3D11Resource*)t.texture2D, &desc, &t.dsv);
-			}
-			d3d.current_framebuffer.depth_stencil = readonly_ds ? t.dsv_ro : t.dsv;
+		if(!t.rtv) {
+			D3D11_RENDER_TARGET_VIEW_DESC desc = {};
+			desc.Format = t.dxgi_format;
+			desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+			desc.Texture2D.MipSlice = 0;
+			d3d.device->CreateRenderTargetView((ID3D11Resource*)t.texture2D, &desc, &t.rtv);
 		}
-		else {
-			if(!t.rtv) {
-				D3D11_RENDER_TARGET_VIEW_DESC desc = {};
-				desc.Format = t.dxgi_format;
-				desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-				desc.Texture2D.MipSlice = 0;
-				d3d.device->CreateRenderTargetView((ID3D11Resource*)t.texture2D, &desc, &t.rtv);
-			}
-			ASSERT(d3d.current_framebuffer.count < (u32)lengthOf(d3d.current_framebuffer.render_targets));
-			d3d.current_framebuffer.render_targets[d3d.current_framebuffer.count] = t.rtv;
-			++d3d.current_framebuffer.count;
+		d3d.current_framebuffer.render_targets[i] = t.rtv;
+	}
+
+	if (ds) {
+		Texture& t = *ds;
+		if(readonly_ds && !t.dsv_ro) {
+			D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
+			desc.Format = toDSViewFormat(t.dxgi_format);
+			desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+			desc.Texture2D.MipSlice = 0;
+			desc.Flags = D3D11_DSV_READ_ONLY_DEPTH;
+			d3d.device->CreateDepthStencilView((ID3D11Resource*)t.texture2D, &desc, &t.dsv_ro);
 		}
+		else if(!t.dsv) {
+			D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
+			desc.Format = toDSViewFormat(t.dxgi_format);
+			desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+			desc.Texture2D.MipSlice = 0;
+			d3d.device->CreateDepthStencilView((ID3D11Resource*)t.texture2D, &desc, &t.dsv);
+		}
+		d3d.current_framebuffer.depth_stencil = readonly_ds ? t.dsv_ro : t.dsv;
+	}
+	else {
+		d3d.current_framebuffer.depth_stencil = nullptr;
 	}
 
 	d3d.device_ctx->OMSetRenderTargets(d3d.current_framebuffer.count, d3d.current_framebuffer.render_targets, d3d.current_framebuffer.depth_stencil);
@@ -1798,16 +1801,22 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags)
 {
 	if(buffer) {
 		Buffer& b = *buffer;
-		ASSERT(b.srv);
-		if (b.uav) {
-			if (flags & (u32)BindShaderBufferFlags::OUTPUT) {
-				d3d.device_ctx->CSSetUnorderedAccessViews(binding_point, 1, &b.uav, nullptr);
-			}
-			else {
-				d3d.device_ctx->CSSetShaderResources(binding_point, 1, &b.srv);
-			}
+		if (flags & (u32)BindShaderBufferFlags::OUTPUT && b.uav) {
+			d3d.device_ctx->CSSetUnorderedAccessViews(binding_point, 1, &b.uav, nullptr);
+			b.bound_to_output = binding_point;
+			d3d.bound_uavs[binding_point] = buffer;
 		}
 		else {
+			if (b.bound_to_output) {
+				if (d3d.bound_uavs[b.bound_to_output] == buffer) {
+					ID3D11UnorderedAccessView* uav = nullptr;
+					d3d.device_ctx->CSSetUnorderedAccessViews(b.bound_to_output, 1, &uav, nullptr);
+					d3d.bound_uavs[b.bound_to_output] = 0;
+				}
+				b.bound_to_output = 0;
+			}
+
+			d3d.device_ctx->CSSetShaderResources(binding_point, 1, &b.srv);
 			d3d.device_ctx->VSSetShaderResources(binding_point, 1, &b.srv);
 			d3d.device_ctx->PSSetShaderResources(binding_point, 1, &b.srv);
 		}
@@ -1902,7 +1911,6 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 			if (texture.bound_to_output != 0xffFFffFF && d3d.bound_image_textures[texture.bound_to_output] == handles[i]) {
 				ID3D11UnorderedAccessView* uav = nullptr;
 				d3d.device_ctx->CSSetUnorderedAccessViews(texture.bound_to_output, 1, &uav, nullptr);
-			
 			}
 		}
 		else {

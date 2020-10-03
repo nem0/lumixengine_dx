@@ -151,10 +151,15 @@ struct Program {
 	ID3DBlob* cs = nullptr;
 	D3D12_INPUT_ELEMENT_DESC attributes[16];
 	u32 attribute_count = 0;
+	u32 readonly_binding_flags = 0xffFFffFF;
+	#ifdef LUMIX_DEBUG
+		StaticString<64> name;
+	#endif
 };
 
 struct Buffer {
 	D3D12_RESOURCE_STATES setState(ID3D12GraphicsCommandList* cmd_list, D3D12_RESOURCE_STATES new_state) {
+		if (state == new_state) return state;
 		D3D12_RESOURCE_STATES old_state = state;
 		switchState(cmd_list, resource, state, new_state);
 		state = new_state;
@@ -485,7 +490,6 @@ static struct D3D {
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	ProgramHandle current_program = INVALID_PROGRAM;
 	SRV current_srvs[10];
-	SRV current_images[10];
 	u64 current_state = 0;
 	HashMap<u32, ID3D12PipelineState*> pipelines;
 	Window windows[64];
@@ -558,15 +562,24 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const S
 	return res;
 }
 
-static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(HeapAllocator& heap, const SRV* srvs, u32 count) {
+static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(const Program& program, HeapAllocator& heap, const SRV* srvs, u32 count) {
 	D3D12_GPU_DESCRIPTOR_HANDLE res = heap.getGPU();
 	for (u32 i = 0; i < count; ++i) {
+		const bool is_readonly = program.readonly_binding_flags & (1 << i);
 		if (srvs[i].buffer) {
-			const Buffer* b = srvs[i].buffer;
-			heap.copy(d3d.device, b->resource ? b->heap_id : 1);
+			Buffer& b = *srvs[i].buffer;
+			heap.copy(d3d.device, b.resource ? b.heap_id + (is_readonly ? 0 : 1) : 1);
+			b.setState(d3d.cmd_list, is_readonly ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 		} else if (srvs[i].texture) {
-			const Texture& t = *srvs[i].texture;
-			heap.copy(d3d.device, t.resource ? t.heap_id : 0);
+			Texture& t = *srvs[i].texture;
+			const bool is_depth = isDepthFormat(t.dxgi_format);
+			heap.copy(d3d.device, t.resource ? t.heap_id + (is_readonly ? 0 : 1) : 0);
+			if (t.state & D3D12_RESOURCE_STATE_DEPTH_READ) {
+				//t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_DEPTH_READ);
+			}
+			else {
+				t.setState(d3d.cmd_list, is_readonly ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			}
 		}
 		else {
 			heap.copy(d3d.device, 0);
@@ -575,22 +588,6 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(HeapAllocator& heap, const SRV* srvs
 	return res;
 }
 
-static D3D12_GPU_DESCRIPTOR_HANDLE allocUAV(HeapAllocator& heap, const SRV* srvs, u32 count) {
-	D3D12_GPU_DESCRIPTOR_HANDLE res = heap.getGPU();
-	for (u32 i = 0; i < count; ++i) {
-		if (srvs[i].buffer) {
-			const Buffer* b = srvs[i].buffer;
-			heap.copy(d3d.device, b->resource ? b->heap_id + 1 : 1);
-		} else if (srvs[i].texture) {
-			const Texture& t = *srvs[i].texture;
-			heap.copy(d3d.device, t.resource ? t.heap_id + 1 : 0);
-		}
-		else {
-			heap.copy(d3d.device, 0);
-		}
-	}
-	return res;
-}
 
 static D3D12_CPU_DESCRIPTOR_HANDLE allocDSV(HeapAllocator& heap, const Texture& texture) {
 	ASSERT(heap.count + 1 <= heap.max_count);
@@ -1119,7 +1116,7 @@ bool init(void* hwnd, u32 flags) {
 		if (SUCCEEDED(hr)) {
 			info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
 			info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
-			info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, false);
+			info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, true);
 			D3D12_INFO_QUEUE_FILTER filter = {};
 
 			D3D12_MESSAGE_CATEGORY catlist[] = {
@@ -1169,10 +1166,6 @@ bool init(void* hwnd, u32 flags) {
 	if (!createSwapchain((HWND)hwnd, Ref(d3d.windows[0]))) return false;
 
 	for (SRV& h : d3d.current_srvs) {
-		h.texture = INVALID_TEXTURE;
-		h.buffer = INVALID_BUFFER;
-	}
-	for (SRV& h : d3d.current_images) {
 		h.texture = INVALID_TEXTURE;
 		h.buffer = INVALID_BUFFER;
 	}
@@ -1233,7 +1226,7 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip) {
 	ASSERT(false); // TODO
 }
 
-void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
+void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle depth_stencil, u32 flags) {
 	checkThread();
 
 	for (TextureHandle& texture : d3d.current_framebuffer.attachments) {
@@ -1241,7 +1234,7 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 	}
 
 	const bool readonly_ds = flags & (u32)FramebufferFlags::READONLY_DEPTH_STENCIL;
-	if (!attachments) {
+	if (!attachments && !depth_stencil) {
 		d3d.current_framebuffer.count = 1;
 		d3d.current_framebuffer.formats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 		d3d.current_framebuffer.render_targets[0] = allocRTV(d3d.rtv_heap, d3d.current_window->backbuffers[d3d.current_window->swapchain->GetCurrentBackBufferIndex()]);
@@ -1249,23 +1242,24 @@ void setFramebuffer(TextureHandle* attachments, u32 num, u32 flags) {
 		d3d.current_framebuffer.ds_format = DXGI_FORMAT_UNKNOWN;
 	} else {
 		d3d.current_framebuffer.count = 0;
-		d3d.current_framebuffer.depth_stencil = {};
-		d3d.current_framebuffer.ds_format = DXGI_FORMAT_UNKNOWN;
 		for (u32 i = 0; i < num; ++i) {
 			d3d.current_framebuffer.attachments[i] = attachments[i];
 			ASSERT(attachments[i]);
 			Texture& t = *attachments[i];
-			if (isDepthFormat(t.dxgi_format)) {
-				t.setState(d3d.cmd_list, readonly_ds ? D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_DEPTH_WRITE);
-				d3d.current_framebuffer.depth_stencil = allocDSV(d3d.ds_heap, t);
-				d3d.current_framebuffer.ds_format = toDSViewFormat(t.dxgi_format);
-			} else {
-				ASSERT(d3d.current_framebuffer.count < (u32)lengthOf(d3d.current_framebuffer.render_targets));
-				t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_RENDER_TARGET);
-				d3d.current_framebuffer.formats[d3d.current_framebuffer.count] = t.dxgi_format;
-				d3d.current_framebuffer.render_targets[d3d.current_framebuffer.count] = allocRTV(d3d.rtv_heap, t.resource);
-				++d3d.current_framebuffer.count;
-			}
+			ASSERT(d3d.current_framebuffer.count < (u32)lengthOf(d3d.current_framebuffer.render_targets));
+			t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_RENDER_TARGET);
+			d3d.current_framebuffer.formats[d3d.current_framebuffer.count] = t.dxgi_format;
+			d3d.current_framebuffer.render_targets[d3d.current_framebuffer.count] = allocRTV(d3d.rtv_heap, t.resource);
+			++d3d.current_framebuffer.count;
+		}
+		if (depth_stencil) {
+			depth_stencil->setState(d3d.cmd_list, readonly_ds ? D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_DEPTH_WRITE);
+			d3d.current_framebuffer.depth_stencil = allocDSV(d3d.ds_heap, *depth_stencil);
+			d3d.current_framebuffer.ds_format = toDSViewFormat(depth_stencil->dxgi_format);
+		}
+		else {
+			d3d.current_framebuffer.depth_stencil = {};
+			d3d.current_framebuffer.ds_format = DXGI_FORMAT_UNKNOWN;
 		}
 	}
 	D3D12_CPU_DESCRIPTOR_HANDLE* ds = d3d.current_framebuffer.depth_stencil.ptr ? &d3d.current_framebuffer.depth_stencil : nullptr;
@@ -1370,10 +1364,6 @@ u32 swapBuffers() {
 
 	d3d.frame->begin();
 	for (SRV& h : d3d.current_srvs) {
-		h.texture = INVALID_TEXTURE;
-		h.buffer = INVALID_BUFFER;
-	}
-	for (SRV& h : d3d.current_images) {
 		h.texture = INVALID_TEXTURE;
 		h.buffer = INVALID_BUFFER;
 	}
@@ -1605,113 +1595,82 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	props.Type = D3D12_HEAP_TYPE_DEFAULT;
 	props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-	if (false) {
-		// D3D11_TEXTURE2D_DESC desc = {};
-		//
-		// desc.Width = maximum(li->block_width, hdr.dwWidth);
-		// desc.Height = maximum(li->block_width, hdr.dwHeight);
-		// desc.ArraySize = layers;
-		// desc.MipLevels = mip_count;
-		// desc.CPUAccessFlags = 0;
-		// desc.Format = is_srgb ? li->srgb_format : li->format;
-		// desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		// desc.MiscFlags = 0;
-		// desc.Usage = D3D11_USAGE_DEFAULT;
-		// desc.SampleDesc.Count = 1;
-		// texture.dxgi_format = desc.Format;
-		// HRESULT hr = d3d.device->CreateTexture2D(&desc, srd, &texture.texture2D);
-		// ASSERT(SUCCEEDED(hr));
-		//
-		// D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-		// srv_desc.Format = toViewFormat(desc.Format);
-		// srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-		// srv_desc.Texture2DArray.MipLevels = mip_count;
-		// srv_desc.Texture2DArray.ArraySize = layers;
-		// srv_desc.Texture2DArray.FirstArraySlice = 0;
-		//
-		// hr = d3d.device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
-		// ASSERT(SUCCEEDED(hr));
-		ASSERT(false);
-	} else {
-		D3D12_RESOURCE_DESC desc = {};
-		desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-		desc.Width = maximum(li->block_width, hdr.dwWidth);
-		desc.Height = maximum(li->block_width, hdr.dwHeight);
-		desc.DepthOrArraySize = is_cubemap ? 6 : layers;
-		desc.MipLevels = mip_count;
-		desc.Format = is_srgb ? li->srgb_format : li->format;
-		desc.SampleDesc.Count = 1;
-		desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-		desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	D3D12_RESOURCE_DESC desc = {};
+	desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	desc.Width = maximum(li->block_width, hdr.dwWidth);
+	desc.Height = maximum(li->block_width, hdr.dwHeight);
+	desc.DepthOrArraySize = is_cubemap ? 6 : layers;
+	desc.MipLevels = mip_count;
+	desc.Format = is_srgb ? li->srgb_format : li->format;
+	desc.SampleDesc.Count = 1;
+	desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-		texture.dxgi_format = desc.Format;
-		HRESULT hr = d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture.resource));
-		ASSERT(SUCCEEDED(hr));
+	texture.dxgi_format = desc.Format;
+	HRESULT hr = d3d.device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture.resource));
+	ASSERT(SUCCEEDED(hr));
 
-		texture.dxgi_format = desc.Format;
-		D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-		D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
-		srv_desc.Format = toViewFormat(desc.Format);
-		uav_desc.Format = srv_desc.Format;
-		srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-		if (is_cubemap) {
-			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-			srv_desc.TextureCube.MipLevels = mip_count;
-			srv_desc.TextureCube.MostDetailedMip = 0;
-			srv_desc.TextureCube.ResourceMinLODClamp = 0;
+	texture.dxgi_format = desc.Format;
+	D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+	D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+	srv_desc.Format = toViewFormat(desc.Format);
+	uav_desc.Format = srv_desc.Format;
+	srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	if (is_cubemap) {
+		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+		srv_desc.TextureCube.MipLevels = mip_count;
+		srv_desc.TextureCube.MostDetailedMip = 0;
+		srv_desc.TextureCube.ResourceMinLODClamp = 0;
 
-			uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-			uav_desc.Texture2D.MipSlice = 0;
-			uav_desc.Texture2D.PlaneSlice = 0;
-		}
-		else if (layers > 1) {
-			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-			srv_desc.Texture2DArray.ArraySize = layers;
-			srv_desc.Texture2DArray.FirstArraySlice = 0;
-			srv_desc.Texture2DArray.MipLevels = mip_count;
-			srv_desc.Texture2DArray.MostDetailedMip = 0;
-			srv_desc.Texture2DArray.PlaneSlice = 0;
-			srv_desc.Texture2DArray.ResourceMinLODClamp = 0;
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+		uav_desc.Texture2D.MipSlice = 0;
+		uav_desc.Texture2D.PlaneSlice = 0;
+	}
+	else if (layers > 1) {
+		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+		srv_desc.Texture2DArray.ArraySize = layers;
+		srv_desc.Texture2DArray.FirstArraySlice = 0;
+		srv_desc.Texture2DArray.MipLevels = mip_count;
+		srv_desc.Texture2DArray.MostDetailedMip = 0;
+		srv_desc.Texture2DArray.PlaneSlice = 0;
+		srv_desc.Texture2DArray.ResourceMinLODClamp = 0;
 
-			uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-			uav_desc.Texture2DArray.ArraySize = layers;
-			uav_desc.Texture2DArray.FirstArraySlice = 0;
-			uav_desc.Texture2DArray.MipSlice = 0;
-			uav_desc.Texture2DArray.PlaneSlice = 0;
-		}
-		else {
-			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-			srv_desc.Texture2D.MipLevels = mip_count;
-			srv_desc.Texture2D.MostDetailedMip = 0;
-			srv_desc.Texture2D.ResourceMinLODClamp = 0;
-			srv_desc.Texture2D.PlaneSlice = 0;
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+		uav_desc.Texture2DArray.ArraySize = layers;
+		uav_desc.Texture2DArray.FirstArraySlice = 0;
+		uav_desc.Texture2DArray.MipSlice = 0;
+		uav_desc.Texture2DArray.PlaneSlice = 0;
+	}
+	else {
+		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srv_desc.Texture2D.MipLevels = mip_count;
+		srv_desc.Texture2D.MostDetailedMip = 0;
+		srv_desc.Texture2D.ResourceMinLODClamp = 0;
+		srv_desc.Texture2D.PlaneSlice = 0;
 
-			uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-			uav_desc.Texture2D.MipSlice = 0;
-			uav_desc.Texture2D.PlaneSlice = 0;
-		}
-
-
-		texture.heap_id = d3d.srv_heap.alloc(d3d.device, texture.resource, srv_desc, nullptr);
-
-		u64 upload_buffer_size;
-		d3d.device->GetCopyableFootprints(&desc, 0, srd_idx, 0, NULL, NULL, NULL, &upload_buffer_size);
-
-		ID3D12Resource* staging = createUploadBuffer(d3d.device, nullptr, upload_buffer_size);
-
-		UpdateSubresources(d3d.cmd_list, texture.resource, staging, 0, 0, srd_idx, srd);
-
-		switchState(d3d.cmd_list, texture.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
-		texture.state = D3D12_RESOURCE_STATE_GENERIC_READ;
-
-		d3d.frame->to_release.push(staging);
-		if (debug_name) {
-			WCHAR tmp[MAX_PATH];
-			toWChar(tmp, debug_name);
-			texture.resource->SetName(tmp);
-		}
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+		uav_desc.Texture2D.MipSlice = 0;
+		uav_desc.Texture2D.PlaneSlice = 0;
 	}
 
+	texture.heap_id = d3d.srv_heap.alloc(d3d.device, texture.resource, srv_desc, nullptr);
+
+	u64 upload_buffer_size;
+	d3d.device->GetCopyableFootprints(&desc, 0, srd_idx, 0, NULL, NULL, NULL, &upload_buffer_size);
+
+	ID3D12Resource* staging = createUploadBuffer(d3d.device, nullptr, upload_buffer_size);
+
+	UpdateSubresources(d3d.cmd_list, texture.resource, staging, 0, 0, srd_idx, srd);
+
+	switchState(d3d.cmd_list, texture.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+	texture.state = D3D12_RESOURCE_STATE_GENERIC_READ;
+
+	d3d.frame->to_release.push(staging);
+	if (debug_name) {
+		WCHAR tmp[MAX_PATH];
+		toWChar(tmp, debug_name);
+		texture.resource->SetName(tmp);
+	}
 
 	return true;
 }
@@ -2096,6 +2055,7 @@ void drawTriangles(u32 indices_count, DataType index_type) {
 }
 
 void drawArrays(u32 offset, u32 count, PrimitiveType type) {
+	ASSERT(d3d.current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt;
 	switch (type) {
@@ -2122,7 +2082,7 @@ void drawArrays(u32 offset, u32 count, PrimitiveType type) {
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
@@ -2184,6 +2144,7 @@ void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t siz
 
 void bindIndirectBuffer(BufferHandle handle) {
 	d3d.current_indirect_buffer = handle;
+	if (handle) handle->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 }
 
 void bindIndexBuffer(BufferHandle handle) {
@@ -2191,14 +2152,14 @@ void bindIndexBuffer(BufferHandle handle) {
 }
 
 void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
+	ASSERT(d3d.current_program);
 	d3d.cmd_list->SetPipelineState(getPipelineStateCompute());
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE uav = allocUAV(d3d.srv_heap, d3d.current_images, lengthOf(d3d.current_images));
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 
 	d3d.cmd_list->SetComputeRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetComputeRootDescriptorTable(6, srv);
-	d3d.cmd_list->SetComputeRootDescriptorTable(7, uav);
+	d3d.cmd_list->SetComputeRootDescriptorTable(7, srv);
 	d3d.cmd_list->Dispatch(num_groups_x, num_groups_y, num_groups_z);
 }
 
@@ -2219,8 +2180,8 @@ void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u
 }
 
 void bindImageTexture(TextureHandle handle, u32 unit) {
-	d3d.current_images[unit].buffer = INVALID_BUFFER;
-	d3d.current_images[unit].texture = handle;
+	d3d.current_srvs[unit].buffer = INVALID_BUFFER;
+	d3d.current_srvs[unit].texture = handle;
 	if (handle) {
 		handle->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	}
@@ -2230,20 +2191,11 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	for (u32 i = 0; i < count; ++i) {
 		d3d.current_srvs[i + offset].buffer = INVALID_BUFFER;
 		d3d.current_srvs[i + offset].texture = handles[i];
-		if (handles[i]) {
-			Texture& t = *handles[i];
-			if (t.resource) {
-				if (t.state == D3D12_RESOURCE_STATE_DEPTH_WRITE)
-					t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-				else if (t.state & D3D12_RESOURCE_STATE_DEPTH_READ) {
-				} else if (t.state != D3D12_RESOURCE_STATE_GENERIC_READ)
-					t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
-			}
-		}
 	}
 }
 
 void drawIndirect(DataType index_type) {
+	ASSERT(d3d.current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
@@ -2271,7 +2223,7 @@ void drawIndirect(DataType index_type) {
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
@@ -2294,13 +2246,14 @@ void drawIndirect(DataType index_type) {
 }
 
 void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
+	ASSERT(d3d.current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
@@ -2309,6 +2262,7 @@ void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
 }
 
 void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
+	ASSERT(d3d.current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
@@ -2336,7 +2290,7 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
@@ -2393,7 +2347,7 @@ void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, Dat
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
@@ -2566,7 +2520,7 @@ static const TBuiltInResource DefaultTBuiltInResource = {/* .MaxLights = */ 32,
 		/* .generalConstantMatrixVectorIndexing = */ 1,
 	}};
 
-static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out) {
+static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out, Ref<Program> program) {
 	glslang::TProgram p;
 	EShLanguage lang = EShLangVertex;
 	switch (type) {
@@ -2605,6 +2559,7 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 		spirv_cross::CompilerHLSL::Options options;
 		options.shader_model = 50;
 		hlsl.set_hlsl_options(options);
+
 		const spirv_cross::VariableID num_workgroups_builtin_id = hlsl.remap_num_workgroups_builtin();
 		if (num_workgroups_builtin_id != spirv_cross::VariableID(0)) {
 			logError("Renderer") << shader_name
@@ -2613,6 +2568,33 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 			return false;
 		}
 		out = hlsl.compile();
+
+		spirv_cross::ShaderResources resources = hlsl.get_shader_resources();
+		
+		for (spirv_cross::Resource& resource : resources.storage_buffers) {
+			const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
+			spirv_cross::Bitset flags = hlsl.get_buffer_block_flags(resource.id);
+			const bool readonly = flags.get(spv::DecorationNonWritable);
+			if (readonly) {
+				program->readonly_binding_flags |= 1 << binding;
+			}
+			else {
+				program->readonly_binding_flags &= ~(1 << binding);
+			}
+		}
+
+		for (spirv_cross::Resource& resource : resources.storage_images) {
+			const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
+			spirv_cross::Bitset flags = hlsl.get_decoration_bitset(resource.id);
+			const bool readonly = flags.get(spv::DecorationNonWritable);
+			if (readonly) {
+				program->readonly_binding_flags |= 1 << binding;
+			}
+			else {
+				program->readonly_binding_flags &= ~(1 << binding);
+			}
+		}
+
 		return true;
 	}
 	return false;
@@ -2621,7 +2603,9 @@ static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char*
 bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name) {
 	ASSERT(handle);
 	Program& program = *handle;
-
+	#ifdef LUMIX_DEBUG
+		program.name = name;
+	#endif
 	void* vs_bytecode = nullptr;
 	size_t vs_bytecode_len = 0;
 
@@ -2702,7 +2686,7 @@ bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** sr
 		}
 		if (c > (u32)prefixes_count + decl.attributes_count) {
 			std::string hlsl;
-			if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl))) {
+			if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(program))) {
 				return false;
 			}
 			return compile(hlsl.c_str(), type, out);
