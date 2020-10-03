@@ -32,15 +32,6 @@
 #pragma comment(lib, "spirv-cross-glsl.lib")
 #pragma comment(lib, "spirv-cross-hlsl.lib")
 
-static const GUID WKPDID_D3DDebugObjectName     = { 0x429b8c22, 0x9188, 0x4b0c, { 0x87, 0x42, 0xac, 0xb0, 0xbf, 0x85, 0xc2, 0x00 } };
-static const GUID IID_ID3D11Texture2D           = { 0x6f15aaf2, 0xd208, 0x4e89, { 0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c } };
-static const GUID IID_ID3D11Device1             = { 0xa04bfb29, 0x08ef, 0x43d6, { 0xa4, 0x9c, 0xa9, 0xbd, 0xbd, 0xcb, 0xe6, 0x86 } };
-static const GUID IID_ID3D11Device2             = { 0x9d06dffa, 0xd1e5, 0x4d07, { 0x83, 0xa8, 0x1b, 0xb1, 0x23, 0xf2, 0xf8, 0x41 } };
-static const GUID IID_ID3D11Device3             = { 0xa05c8c37, 0xd2c6, 0x4732, { 0xb3, 0xa0, 0x9c, 0xe0, 0xb0, 0xdc, 0x9a, 0xe6 } };
-static const GUID IID_ID3D11InfoQueue           = { 0x6543dbb6, 0x1b48, 0x42f5, { 0xab, 0x82, 0xe9, 0x7e, 0xc7, 0x43, 0x26, 0xf6 } };
-static const GUID IID_IDXGIDeviceRenderDoc      = { 0xa7aa6116, 0x9c8d, 0x4bba, { 0x90, 0x83, 0xb4, 0xd8, 0x16, 0xb7, 0x1b, 0x78 } };
-static const GUID IID_ID3DUserDefinedAnnotation = { 0xb2daad8b, 0x03d4, 0x4dbf, { 0x95, 0xeb, 0x32, 0xab, 0x4b, 0x63, 0xd0, 0xab } };
-
 namespace Lumix {
 
 namespace gpu {
@@ -643,6 +634,7 @@ static struct D3D {
 	TextureHandle bound_textures[16];
 	void* bound_uavs[16];
 	ID3D11Device* device = nullptr;
+	ID3D11Debug* debug = nullptr;
 	ID3DUserDefinedAnnotation* annotation = nullptr;
 	ID3D11Query* disjoint_query = nullptr;
 	bool disjoint_waiting = false;
@@ -1006,8 +998,13 @@ void shutdown() {
 	d3d.disjoint_query->Release();
 	d3d.annotation->Release();
 	d3d.device_ctx->Release();
-	d3d.device->Release();
 
+	#ifdef LUMIX_DEBUG
+		if(d3d.debug) d3d.debug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL | D3D11_RLDO_IGNORE_INTERNAL);
+	#endif
+	if(d3d.debug) d3d.debug->Release();
+
+	d3d.device->Release();
 	FreeLibrary(d3d.d3d_dll);
 	FreeLibrary(d3d.dxgi_dll);
 }
@@ -1082,7 +1079,8 @@ bool init(void* hwnd, u32 flags) {
 		, &feature_level
 		, &ctx);
 
-	ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&d3d.device_ctx);
+	ctx->QueryInterface(IID_PPV_ARGS(&d3d.device_ctx));
+	ctx->Release();
 
 	if(!SUCCEEDED(hr)) return false;
 
@@ -1110,6 +1108,8 @@ bool init(void* hwnd, u32 flags) {
 	hr = d3d.device->CreateTexture2D(&ds_desc, NULL, &ds);
 	if(!SUCCEEDED(hr)) return false;
 
+	ds->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen("default_win_ds"), "default_win_ds");
+
 	D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc;
 	memset(&dsv_desc, 0, sizeof(dsv_desc));
 	dsv_desc.Format = ds_desc.Format;
@@ -1117,24 +1117,23 @@ bool init(void* hwnd, u32 flags) {
 
 	hr = d3d.device->CreateDepthStencilView((ID3D11Resource*)ds, &dsv_desc, &d3d.windows[0].framebuffer.depth_stencil);
 	if(!SUCCEEDED(hr)) return false;
+	ds->Release();
 
 	d3d.current_framebuffer = d3d.windows[0].framebuffer;
 
-	d3d.device_ctx->QueryInterface(IID_ID3DUserDefinedAnnotation, (void**)&d3d.annotation);
+	d3d.device_ctx->QueryInterface(IID_PPV_ARGS(&d3d.annotation));
 
 	if(debug) {
-		ID3D11Debug* d3d_debug = nullptr;
-		hr = d3d.device->QueryInterface(__uuidof(ID3D11Debug), (void**)&d3d_debug);
+		hr = d3d.device->QueryInterface(IID_PPV_ARGS(&d3d.debug));
 		if (SUCCEEDED(hr)) {
 			ID3D11InfoQueue* info_queue;
-			hr = d3d_debug->QueryInterface(__uuidof(ID3D11InfoQueue), (void**)&info_queue);
+			hr = d3d.debug->QueryInterface(IID_PPV_ARGS(&info_queue));
 			if (SUCCEEDED(hr)) {
 				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_ERROR, true);
 				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_CORRUPTION, true);
 				info_queue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, false);
 				info_queue->Release();
 			}
-			d3d_debug->Release();
 		}
 
 	}
@@ -1466,6 +1465,8 @@ u32 swapBuffers()
 				ID3D11Texture2D* ds;
 				hr = d3d.device->CreateTexture2D(&ds_desc, NULL, &ds);
 				ASSERT(SUCCEEDED(hr));
+
+				ds->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen("win_ds"), "win_ds");
 
 				D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc;
 				memset(&dsv_desc, 0, sizeof(dsv_desc));
