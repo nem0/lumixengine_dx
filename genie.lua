@@ -5,7 +5,7 @@ newoption {
 
 newoption {
 	trigger = "nodx",
-	description = "use dx12 backend"
+	description = "do not use any dx backend"
 }
 
 if _OPTIONS["nodx"] == nil then
