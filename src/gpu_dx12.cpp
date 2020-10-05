@@ -505,6 +505,7 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 				auto iter = m_cache.find(hash);
 				if (iter.isValid()) {
 					set(type, iter.value().data(), iter.value().size(), program);
+					// TODO set used_srvs_flags and readonly_binding_flags 
 					return true;
 				}
 
