@@ -10,6 +10,7 @@
 #include "engine/sync.h"
 #include "renderer/gpu/dds.h"
 #include "renderer/gpu/gpu.h"
+#include "shader_compiler.h"
 #include "stb/stb_image_resize.h"
 #include <Windows.h>
 #include <cassert>
@@ -17,6 +18,9 @@
 #include <d3dcompiler.h>
 #include <d3dx12.h>
 #include <dxgi.h>
+#ifdef LUMIX_DEBUG
+	#include <dxgidebug.h>
+#endif
 #include <dxgi1_6.h>
 #include <malloc.h>
 
@@ -45,7 +49,8 @@ namespace gpu {
 
 static constexpr u32 NUM_BACKBUFFERS = 3;
 static constexpr u32 SCRATCH_BUFFER_SIZE = 4 * 1024 * 1024;
-static constexpr u32 MAX_DESCRIPTORS = 64 * 1024;
+static constexpr u32 MAX_DESCRIPTORS = 128 * 1024;
+static constexpr u32 QUERY_COUNT = 2048;
 
 template <int N> static void toWChar(WCHAR (&out)[N], const char* in) {
 	const char* c = in;
@@ -123,6 +128,40 @@ int getSize(AttributeType type) {
 	}
 }
 
+static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
+	switch (attr.type) {
+		case AttributeType::FLOAT:
+			switch (attr.components_count) {
+				case 1: return DXGI_FORMAT_R32_FLOAT;
+				case 2: return DXGI_FORMAT_R32G32_FLOAT;
+				case 3: return DXGI_FORMAT_R32G32B32_FLOAT;
+				case 4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+			}
+			break;
+		case AttributeType::I8:
+			switch (attr.components_count) {
+				case 1: return DXGI_FORMAT_R8_SNORM;
+				case 2: return DXGI_FORMAT_R8G8_SNORM;
+				case 4: return DXGI_FORMAT_R8G8B8A8_SNORM;
+			}
+			break;
+		case AttributeType::U8:
+			switch (attr.components_count) {
+				case 1: return DXGI_FORMAT_R8_UNORM;
+				case 2: return DXGI_FORMAT_R8G8_UNORM;
+				case 4: return DXGI_FORMAT_R8G8B8A8_UNORM;
+			}
+			break;
+		case AttributeType::I16:
+			switch (attr.components_count) {
+				case 4: return DXGI_FORMAT_R16G16B16A16_SINT;
+			}
+			break;
+	}
+	ASSERT(false);
+	return DXGI_FORMAT_R32_FLOAT;
+}
+
 static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 	switch (format) {
 		case TextureFormat::R8: return DXGI_FORMAT_R8_UNORM;
@@ -144,11 +183,23 @@ static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 	return DXGI_FORMAT_R8G8B8A8_UINT;
 }
 
+struct Query {
+	u32 idx;
+	u64 timestamp = 0;
+};
+
 struct Program {
-	ID3DBlob* vs = nullptr;
-	ID3DBlob* ps = nullptr;
-	ID3DBlob* gs = nullptr;
-	ID3DBlob* cs = nullptr;
+	Program(IAllocator& allocator)
+		: vs(allocator)
+		, ps(allocator)
+		, gs(allocator)
+		, cs(allocator)
+	{}
+
+	OutputMemoryStream vs;
+	OutputMemoryStream ps;
+	OutputMemoryStream gs;
+	OutputMemoryStream cs;
 	D3D12_INPUT_ELEMENT_DESC attributes[16];
 	u32 attribute_count = 0;
 	u32 readonly_binding_flags = 0xffFFffFF;
@@ -190,6 +241,288 @@ struct Texture {
 	#ifdef LUMIX_DEBUG
 		StaticString<64> name;
 	#endif
+};
+
+struct FrameBuffer {
+	D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil = {};
+	D3D12_CPU_DESCRIPTOR_HANDLE render_targets[8] = {};
+	DXGI_FORMAT formats[8] = {};
+	DXGI_FORMAT ds_format = {};
+	TextureHandle attachments[9] = {};
+	u32 count = 0;
+};
+
+struct PSOCache {
+	PSOCache(IAllocator& allocator)
+		: cache(allocator)
+	{}
+
+	ID3D12PipelineState* getPipelineStateCompute(ID3D12Device* device, ID3D12RootSignature* root_signature, ProgramHandle program) {
+		const u32 hash = crc32(&program, sizeof(program));
+		
+		auto iter = cache.find(hash);
+		if (iter.isValid()) return iter.value();
+
+		Program& p = *program;
+		D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+		desc.CS = {p.cs.data(), p.cs.size()};
+		desc.NodeMask = 1;
+		desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+		desc.pRootSignature = root_signature;
+
+		ID3D12PipelineState* pso;
+		HRESULT hr = device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso));
+		ASSERT(hr == S_OK);
+		cache.insert(hash, pso);
+		return pso;
+	}
+
+	void set(ID3D12Device* device
+		, ID3D12GraphicsCommandList* cmd_list
+		, u64 state
+		, ProgramHandle program
+		, const FrameBuffer& fb
+		, ID3D12RootSignature* root_signature
+		, D3D12_PRIMITIVE_TOPOLOGY_TYPE pt)
+	{
+		if (last) return;
+		ID3D12PipelineState* pso = getPipelineState(device, state, program, fb, root_signature, pt);
+		cmd_list->SetPipelineState(pso);
+	}
+
+	ID3D12PipelineState* getPipelineState(ID3D12Device* device
+		, u64 state
+		, ProgramHandle program
+		, const FrameBuffer& fb
+		, ID3D12RootSignature* root_signature
+		, D3D12_PRIMITIVE_TOPOLOGY_TYPE pt)
+	{
+		if (last) return last;
+
+		ASSERT(program);
+		Program& p = *program;
+		u32 hash = crc32(&state, sizeof(state));
+		hash = continueCrc32(hash, &program, sizeof(program));
+		hash = continueCrc32(hash, &pt, sizeof(pt));
+		hash = continueCrc32(hash, &fb.ds_format, sizeof(fb.ds_format));
+		hash = continueCrc32(hash, &fb.formats[0], sizeof(fb.formats[0]) * fb.count);
+
+		auto iter = cache.find(hash);
+		if (iter.isValid()) {
+			last = iter.value();
+			return iter.value();
+		}
+
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+		if (p.vs.size() > 0) desc.VS = {p.vs.data(), p.vs.size()};
+		if (p.ps.size() > 0) desc.PS = {p.ps.data(), p.ps.size()};
+		if (p.gs.size() > 0) desc.GS = {p.gs.data(), p.gs.size()};
+
+		desc.PrimitiveTopologyType = pt;
+
+		if (state & u64(StateFlags::CULL_BACK)) {
+			desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+		} else if (state & u64(StateFlags::CULL_FRONT)) {
+			desc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
+		} else {
+			desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+		}
+
+		desc.pRootSignature = root_signature;
+		desc.RasterizerState.FrontCounterClockwise = TRUE;
+		desc.RasterizerState.FillMode = (state & u64(StateFlags::WIREFRAME)) != 0 ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
+		// TODO enable/disable scissor
+		desc.RasterizerState.DepthClipEnable = FALSE;
+
+		desc.DepthStencilState.DepthEnable = (state & u64(StateFlags::DEPTH_TEST)) != 0;
+		desc.DepthStencilState.DepthWriteMask = (state & u64(StateFlags::DEPTH_WRITE)) != 0 && desc.DepthStencilState.DepthEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+		desc.DepthStencilState.DepthFunc = (state & u64(StateFlags::DEPTH_TEST)) != 0 ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_ALWAYS;
+
+		const StencilFuncs func = (StencilFuncs)((state >> 30) & 0xf);
+		desc.DepthStencilState.StencilEnable = func != StencilFuncs::DISABLE;
+		if (desc.DepthStencilState.StencilEnable) {
+			desc.DepthStencilState.StencilReadMask = u8(state >> 42);
+			desc.DepthStencilState.StencilWriteMask = u8(state >> 22);
+			D3D12_COMPARISON_FUNC dx_func;
+			switch (func) {
+				case StencilFuncs::ALWAYS: dx_func = D3D12_COMPARISON_FUNC_ALWAYS; break;
+				case StencilFuncs::EQUAL: dx_func = D3D12_COMPARISON_FUNC_EQUAL; break;
+				case StencilFuncs::NOT_EQUAL: dx_func = D3D12_COMPARISON_FUNC_NOT_EQUAL; break;
+				default: ASSERT(false); break;
+			}
+			auto toDXOp = [](StencilOps op) {
+				constexpr D3D12_STENCIL_OP table[] = {D3D12_STENCIL_OP_KEEP,
+					D3D12_STENCIL_OP_ZERO,
+					D3D12_STENCIL_OP_REPLACE,
+					D3D12_STENCIL_OP_INCR_SAT,
+					D3D12_STENCIL_OP_DECR_SAT,
+					D3D12_STENCIL_OP_INVERT,
+					D3D12_STENCIL_OP_INCR,
+					D3D12_STENCIL_OP_DECR};
+				return table[(int)op];
+			};
+			const D3D12_STENCIL_OP sfail = toDXOp(StencilOps((state >> 50) & 0xf));
+			const D3D12_STENCIL_OP zfail = toDXOp(StencilOps((state >> 54) & 0xf));
+			const D3D12_STENCIL_OP zpass = toDXOp(StencilOps((state >> 58) & 0xf));
+
+			desc.DepthStencilState.FrontFace.StencilFailOp = sfail;
+			desc.DepthStencilState.FrontFace.StencilDepthFailOp = zfail;
+			desc.DepthStencilState.FrontFace.StencilPassOp = zpass;
+			desc.DepthStencilState.FrontFace.StencilFunc = dx_func;
+
+			desc.DepthStencilState.BackFace.StencilFailOp = sfail;
+			desc.DepthStencilState.BackFace.StencilDepthFailOp = zfail;
+			desc.DepthStencilState.BackFace.StencilPassOp = zpass;
+			desc.DepthStencilState.BackFace.StencilFunc = dx_func;
+		}
+
+		const u16 blend_bits = u16(state >> 6);
+
+		auto to_dx = [&](BlendFactors factor) -> D3D12_BLEND {
+			static const D3D12_BLEND table[] = {
+				D3D12_BLEND_ZERO,
+				D3D12_BLEND_ONE,
+				D3D12_BLEND_SRC_COLOR,
+				D3D12_BLEND_INV_SRC_COLOR,
+				D3D12_BLEND_SRC_ALPHA,
+				D3D12_BLEND_INV_SRC_ALPHA,
+				D3D12_BLEND_DEST_COLOR,
+				D3D12_BLEND_INV_DEST_COLOR,
+				D3D12_BLEND_DEST_ALPHA,
+				D3D12_BLEND_INV_DEST_ALPHA,
+				D3D12_BLEND_SRC1_COLOR,
+				D3D12_BLEND_INV_SRC1_COLOR,
+				D3D12_BLEND_SRC1_ALPHA,
+				D3D12_BLEND_INV_SRC1_ALPHA,
+			};
+			ASSERT((u32)factor < lengthOf(table));
+			return table[(int)factor];
+		};
+
+		for (u32 rt_idx = 0; rt_idx < (u32)lengthOf(desc.BlendState.RenderTarget); ++rt_idx) {
+			if (blend_bits) {
+				const BlendFactors src_rgb = (BlendFactors)(blend_bits & 0xf);
+				const BlendFactors dst_rgb = (BlendFactors)((blend_bits >> 4) & 0xf);
+				const BlendFactors src_a = (BlendFactors)((blend_bits >> 8) & 0xf);
+				const BlendFactors dst_a = (BlendFactors)((blend_bits >> 12) & 0xf);
+
+				desc.BlendState.RenderTarget[rt_idx].BlendEnable = true;
+				desc.BlendState.AlphaToCoverageEnable = false;
+				desc.BlendState.RenderTarget[rt_idx].SrcBlend = to_dx(src_rgb);
+				desc.BlendState.RenderTarget[rt_idx].DestBlend = to_dx(dst_rgb);
+				desc.BlendState.RenderTarget[rt_idx].BlendOp = D3D12_BLEND_OP_ADD;
+				desc.BlendState.RenderTarget[rt_idx].SrcBlendAlpha = to_dx(src_a);
+				desc.BlendState.RenderTarget[rt_idx].DestBlendAlpha = to_dx(dst_a);
+				desc.BlendState.RenderTarget[rt_idx].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+				desc.BlendState.RenderTarget[rt_idx].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+			} else {
+				desc.BlendState.RenderTarget[rt_idx].BlendEnable = false;
+				desc.BlendState.RenderTarget[rt_idx].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+				desc.BlendState.RenderTarget[rt_idx].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+				desc.BlendState.RenderTarget[rt_idx].BlendOp = D3D12_BLEND_OP_ADD;
+				desc.BlendState.RenderTarget[rt_idx].SrcBlendAlpha = D3D12_BLEND_SRC_ALPHA;
+				desc.BlendState.RenderTarget[rt_idx].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+				desc.BlendState.RenderTarget[rt_idx].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+				desc.BlendState.RenderTarget[rt_idx].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+			}
+		}
+
+		desc.SampleDesc.Count = 1;
+		desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+		desc.NodeMask = 1;
+		desc.SampleMask = 0xffFFffFF;
+
+		desc.InputLayout.NumElements = p.attribute_count;
+		desc.InputLayout.pInputElementDescs = p.attributes;
+
+		desc.DSVFormat = fb.ds_format;
+		desc.NumRenderTargets = fb.count;
+		for (u32 i = 0; i < fb.count; ++i) {
+			desc.RTVFormats[i] = fb.formats[i];
+		}
+
+		ID3D12PipelineState* pso;
+		HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso));
+		ASSERT(hr == S_OK);
+		cache.insert(hash, pso);
+		last = pso;
+		return pso;
+	}
+
+	HashMap<u32, ID3D12PipelineState*> cache;
+	ID3D12PipelineState* last = nullptr;
+};
+
+struct ShaderCompilerDX12 : ShaderCompiler {
+	ShaderCompilerDX12(IAllocator& allocator)
+		: ShaderCompiler(allocator)
+	{}
+
+	static void set(ShaderType type, const void* data, u64 size, Ref<Program> program) {
+		OutputMemoryStream* str;
+		switch(type) {
+			case ShaderType::COMPUTE: str = &program->cs; break;
+			case ShaderType::VERTEX: str = &program->vs; break;
+			case ShaderType::FRAGMENT: str = &program->ps; break;
+			case ShaderType::GEOMETRY: str = &program->gs; break;
+			default: ASSERT(false); return;
+		}
+		str->resize(size);
+		memcpy(str->getMutableData(), data, size);
+	}
+
+	bool compile(const VertexDecl& decl
+		, const Input& input
+		, const char* name
+		, Ref<Program> program)
+	{
+		program->attribute_count = decl.attributes_count;
+		for (u8 i = 0; i < decl.attributes_count; ++i) {
+			const Attribute& attr = decl.attributes[i];
+			const bool instanced = attr.flags & Attribute::INSTANCED;
+			program->attributes[i].AlignedByteOffset = attr.byte_offset;
+			program->attributes[i].Format = getDXGIFormat(attr);
+			program->attributes[i].SemanticIndex = attr.idx;
+			program->attributes[i].SemanticName = "TEXCOORD";
+			program->attributes[i].InputSlot = instanced ? 1 : 0;
+			program->attributes[i].InputSlotClass = instanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+			program->attributes[i].InstanceDataStepRate = instanced ? 1 : 0;
+		}
+
+		auto compile_stage = [&](ShaderType type, Ref<OutputMemoryStream> out) -> bool {
+			const char* tmp[128];
+			const u32 c = filter(input, type, tmp);
+			if (c == 0) {
+				out->clear();
+				return true;
+			}
+			if (c > (u32)input.prefixes.length() + decl.attributes_count) {
+				const u32 hash = computeHash(tmp, c);
+				auto iter = m_cache.find(hash);
+				if (iter.isValid()) {
+					set(type, iter.value().data(), iter.value().size(), program);
+					return true;
+				}
+
+				std::string hlsl;
+				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(program->readonly_binding_flags))) {
+					return false;
+				}
+				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name);
+				if (!blob) return false;
+				set(type, blob->GetBufferPointer(), blob->GetBufferSize(), program);
+				blob->Release();
+				return true;
+			}
+			return false;
+		};
+
+		bool compiled = compile_stage(ShaderType::VERTEX, Ref(program->vs));
+		compiled = compiled && compile_stage(ShaderType::FRAGMENT, Ref(program->ps));
+		compiled = compiled && compile_stage(ShaderType::COMPUTE, Ref(program->cs));
+		compiled = compiled && compile_stage(ShaderType::GEOMETRY, Ref(program->gs));
+		return compiled;
+	}
 };
 
 struct SamplerAllocator {
@@ -332,9 +665,9 @@ struct HeapAllocator {
 	u32 frame = 0;
 };
 
-static ID3D12Resource* createUploadBuffer(ID3D12Device* device, const void* data, u64 size) {
+static ID3D12Resource* createBuffer(ID3D12Device* device, const void* data, u64 size, D3D12_HEAP_TYPE type) {
 	D3D12_HEAP_PROPERTIES upload_heap_props;
-	upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
+	upload_heap_props.Type = type;
 	upload_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	upload_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 	upload_heap_props.CreationNodeMask = 1;
@@ -354,7 +687,9 @@ static ID3D12Resource* createUploadBuffer(ID3D12Device* device, const void* data
 	desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 	ID3D12Resource* upload_buffer;
 
-	HRESULT hr = device->CreateCommittedResource(&upload_heap_props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload_buffer));
+	const D3D12_RESOURCE_STATES state = type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_GENERIC_READ;
+
+	HRESULT hr = device->CreateCommittedResource(&upload_heap_props, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&upload_buffer));
 	ASSERT(hr == S_OK);
 
 	if (data) {
@@ -371,15 +706,28 @@ static ID3D12Resource* createUploadBuffer(ID3D12Device* device, const void* data
 
 struct Frame {
 	Frame(IAllocator& allocator)
-		: to_release(allocator) {}
+		: to_release(allocator)
+		, to_resolve(allocator)
+	{}
+
+	void clear() {
+		for (IUnknown* res : to_release) res->Release();
+		to_release.clear();
+
+		scratch_buffer->Release();
+		query_buffer->Release();
+	}
 
 	bool init(ID3D12Device* device) {
 		if (device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmd_allocator)) != S_OK) return false;
 
-		scratch_buffer = createUploadBuffer(device, nullptr, SCRATCH_BUFFER_SIZE);
+		scratch_buffer = createBuffer(device, nullptr, SCRATCH_BUFFER_SIZE, D3D12_HEAP_TYPE_UPLOAD);
 
 		scratch_buffer->Map(0, nullptr, (void**)&scratch_buffer_begin);
 		scratch_buffer_ptr = scratch_buffer_begin;
+
+		query_buffer = createBuffer(device, nullptr, sizeof(u64) * QUERY_COUNT, D3D12_HEAP_TYPE_READBACK);
+		query_buffer->Map(0, nullptr, (void**)&query_buffer_ptr);
 
 		return true;
 	}
@@ -395,16 +743,27 @@ struct Frame {
 	void begin() {
 		wait();
 
+		for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
+			QueryHandle q = to_resolve[i];
+			memcpy(&q->timestamp, query_buffer_ptr + i * 8, sizeof(q->timestamp));
+		}
+		to_resolve.clear();
+
 		for (IUnknown* res : to_release) res->Release();
 		to_release.clear();
 	}
 
-	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12Fence* fence, Ref<u64> fence_value) {
+	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12Fence* fence, ID3D12QueryHeap* query_heap, Ref<u64> fence_value) {
+		for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
+			QueryHandle q = to_resolve[i];
+			cmd_list->ResolveQueryData(query_heap, D3D12_QUERY_TYPE_TIMESTAMP, q->idx, 1, query_buffer, i * 8);
+		}
 		HRESULT hr = cmd_list->Close();
 		ASSERT(hr == S_OK);
 		hr = cmd_queue->Wait(fence, fence_value);
 		ASSERT(hr == S_OK);
 		cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmd_list);
+
 		++fence_value;
 		hr = cmd_queue->Signal(fence, fence_value);
 		ASSERT(hr == S_OK);
@@ -420,29 +779,9 @@ struct Frame {
 	ID3D12CommandAllocator* cmd_allocator = nullptr;
 	Array<IUnknown*> to_release;
 	HANDLE fence_event = nullptr;
-};
-
-
-template <typename T, int C> struct StaticArray {
-	template <typename... Args> void push(Args&&... args) {
-		ASSERT(count < C);
-		new (NewPlaceholder(), mem + count * sizeof(T)) T(static_cast<Args&&>(args)...);
-		++count;
-	}
-
-	T& operator[](u32 idx) { return ((T*)mem)[idx]; }
-
-	T* begin() { return (T*)mem; }
-	T* end() { return (T*)mem + count; }
-
-	~StaticArray() {
-		for (T& i : *this) {
-			i.~T();
-		}
-	}
-
-	alignas(T) u8 mem[sizeof(T) * C];
-	u32 count = 0;
+	Array<Query*> to_resolve;
+	ID3D12Resource* query_buffer;
+	u8* query_buffer_ptr;
 };
 
 struct SRV {
@@ -453,15 +792,6 @@ struct SRV {
 static struct D3D {
 	bool initialized = false;
 
-	struct FrameBuffer {
-		D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil = {};
-		D3D12_CPU_DESCRIPTOR_HANDLE render_targets[8] = {};
-		DXGI_FORMAT formats[8] = {};
-		DXGI_FORMAT ds_format = {};
-		TextureHandle attachments[9] = {};
-		u32 count = 0;
-	};
-
 	struct Window {
 		void* handle = nullptr;
 		IDXGISwapChain3* swapchain = nullptr;
@@ -470,12 +800,16 @@ static struct D3D {
 	};
 
 	D3D()
-		: pipelines(static_allocator)
-		, srv_heap(static_allocator)
+		: srv_heap(static_allocator)
 		, ds_heap(static_allocator)
 		, sampler_heap(static_allocator)
-		, rtv_heap(static_allocator) {}
+		, rtv_heap(static_allocator)
+		, shader_compiler(static_allocator)
+		, frames(static_allocator)
+		, pso_cache(static_allocator)
+	{}
 
+	DefaultAllocator static_allocator;
 	DWORD thread;
 	RENDERDOC_API_1_0_2* rdoc_api = nullptr;
 	IAllocator* allocator = nullptr;
@@ -490,21 +824,24 @@ static struct D3D {
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	ProgramHandle current_program = INVALID_PROGRAM;
 	SRV current_srvs[10];
+	bool srv_dirty = true;
 	u64 current_state = 0;
-	HashMap<u32, ID3D12PipelineState*> pipelines;
+	PSOCache pso_cache;
 	Window windows[64];
 	Window* current_window = windows;
 	FrameBuffer current_framebuffer;
-	StaticArray<Frame, 3> frames;
+	Array<Frame> frames;
 	Frame* frame;
 	ID3D12GraphicsCommandList* cmd_list = nullptr;
-	DefaultAllocator static_allocator;
 	HMODULE d3d_dll;
 	HMODULE dxgi_dll;
 	HeapAllocator srv_heap;
+	ID3D12QueryHeap* query_heap;
+	u32 query_count = 0;
 	SamplerAllocator sampler_heap;
 	HeapAllocator rtv_heap;
 	HeapAllocator ds_heap;
+	ShaderCompilerDX12 shader_compiler;
 } d3d;
 
 
@@ -714,16 +1051,12 @@ static void try_load_renderdoc() {
 }
 
 QueryHandle createQuery() {
-	// checkThread();
-	// MutexGuard lock(d3d.handle_mutex);
-	// const int idx = d3d.queries.alloc();
-	// d3d.queries[idx] = {};
-	// D3D11_QUERY_DESC desc = {};
-	// desc.Query = D3D11_QUERY_TIMESTAMP;
-	// d3d.device->CreateQuery(&desc, &d3d.queries[idx].query);
-	// ASSERT(d3d.queries[idx].query);
-	// return { (u32)idx };
-	return {};
+	checkThread();
+	ASSERT(d3d.query_count < QUERY_COUNT);
+	Query* q = LUMIX_NEW(*d3d.allocator, Query);
+	q->idx = d3d.query_count;
+	++d3d.query_count;
+	return q;
 }
 
 void startCapture() {
@@ -747,12 +1080,6 @@ void destroy(ProgramHandle program) {
 	checkThread();
 
 	ASSERT(program);
-	Program& p = *program;
-	if (p.gs) d3d.frame->to_release.push(p.gs);
-	if (p.ps) d3d.frame->to_release.push(p.ps);
-	if (p.vs) d3d.frame->to_release.push(p.vs);
-	if (p.cs) d3d.frame->to_release.push(p.cs);
-
 	LUMIX_DELETE(*d3d.allocator, program);
 }
 
@@ -765,12 +1092,10 @@ void destroy(TextureHandle texture) {
 }
 
 void destroy(QueryHandle query) {
-	// checkThread();
-	//
-	// d3d.queries[query.value].query->Release();
-	//
-	// MutexGuard lock(d3d.handle_mutex);
-	// d3d.queries.dealloc(query.value);
+	checkThread();
+	// frame should not have a pointer to query, because higher level destroys all queries at once on shutdown
+	ASSERT(query->timestamp); 
+	LUMIX_DELETE(*d3d.allocator, query);
 }
 
 void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) {
@@ -873,8 +1198,11 @@ void readTexture(TextureHandle handle, u32 mip, Span<u8> buf) {
 }
 
 void queryTimestamp(QueryHandle query) {
-	// checkThread();
-	// d3d.device_ctx->End(d3d.queries[query.value].query);
+	checkThread();
+	ASSERT(query);
+	query->timestamp = 0;
+	d3d.frame->to_resolve.push(query);
+	d3d.cmd_list->EndQuery(d3d.query_heap, D3D12_QUERY_TYPE_TIMESTAMP, query->idx);
 }
 
 u64 getQueryFrequency() {
@@ -882,21 +1210,16 @@ u64 getQueryFrequency() {
 }
 
 u64 getQueryResult(QueryHandle query) {
-	// checkThread();
-	// ID3D11Query* q = d3d.queries[query.value].query;
-	// u64 time;
-	// const HRESULT res = d3d.device_ctx->GetData(q, &time, sizeof(time), 0);
-	// ASSERT(res == S_OK);
-	// return time;
-	return {};
+	checkThread();
+	ASSERT(query);
+	ASSERT(query->timestamp);
+	return query->timestamp;
 }
 
 bool isQueryReady(QueryHandle query) {
-	// checkThread();
-	// ID3D11Query* q = d3d.queries[query.value].query;
-	// const HRESULT res = d3d.device_ctx->GetData(q, nullptr, 0, 0);
-	// return res == S_OK;
-	return {};
+	checkThread();
+	ASSERT(query);
+	return query->timestamp != 0;
 }
 
 void preinit(IAllocator& allocator, bool load_renderdoc) {
@@ -910,46 +1233,35 @@ void preinit(IAllocator& allocator, bool load_renderdoc) {
 }
 
 void shutdown() {
-	// ShFinalize();
-	//
-	// ASSERT(d3d.buffers.count == 0);
-	// ASSERT(d3d.programs.count == 0);
-	// ASSERT(d3d.queries.count == 0);
-	// ASSERT(d3d.textures.count == 0);
-	//
-	// for (const D3D::State& s : d3d.state_cache) {
-	//	s.bs->Release();
-	//	s.dss->Release();
-	//	s.rs->Release();
-	//}
-	// d3d.state_cache.clear();
-	//
-	// for (ID3D11SamplerState*& sampler : d3d.samplers) {
-	//	if (!sampler) continue;
-	//
-	//	sampler->Release();
-	//	sampler = nullptr;
-	//}
-	//
-	// for (D3D::Window& w : d3d.windows) {
-	//	if (!w.handle) continue;
-	//
-	//	if (w.framebuffer.depth_stencil) {
-	//		w.framebuffer.depth_stencil->Release();
-	//		w.framebuffer.depth_stencil = nullptr;
-	//	}
-	//	for (u32 i = 0; i < w.framebuffer.count; ++i) {
-	//		w.framebuffer.render_targets[i]->Release();
-	//	}
-	//	w.framebuffer.count = 0;
-	//	w.swapchain->Release();
-	//}
-	//
-	// d3d.disjoint_query->Release();
-	// d3d.annotation->Release();
-	// d3d.device_ctx->Release();
-	// d3d.device->Release();
-	//
+	d3d.shader_compiler.save(".shader_cache_dx");
+	ShFinalize();
+
+	for (Frame& frame : d3d.frames) {
+		frame.clear();
+	}
+	d3d.frames.clear();
+
+	for (D3D::Window& w : d3d.windows) {
+		if (!w.handle) continue;
+		w.swapchain->Release();
+	}
+	
+	d3d.root_signature->Release();
+	d3d.query_heap->Release();
+	d3d.fence->Release();
+	d3d.cmd_queue->Release();
+	d3d.cmd_list->Release();
+	if(d3d.debug) d3d.debug->Release();
+	d3d.device->Release();
+
+	#ifdef LUMIX_DEBUG
+		auto api_DXGIGetDebugInterface1 = (decltype(DXGIGetDebugInterface1)*)GetProcAddress(d3d.dxgi_dll, "DXGIGetDebugInterface1");
+		IDXGIDebug1* dxgi_debug;
+		if (DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgi_debug)) == S_OK) {
+			dxgi_debug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_FLAGS(DXGI_DEBUG_RLO_DETAIL | DXGI_DEBUG_RLO_IGNORE_INTERNAL));
+		}
+	#endif
+
 	FreeLibrary(d3d.d3d_dll);
 	FreeLibrary(d3d.dxgi_dll);
 }
@@ -1092,7 +1404,7 @@ bool init(void* hwnd, u32 flags) {
 		return false;
 	}
 
-#define DECL_D3D_API(f) auto api_##f = (decltype(f)*)GetProcAddress(d3d.d3d_dll, #f);
+	#define DECL_D3D_API(f) auto api_##f = (decltype(f)*)GetProcAddress(d3d.d3d_dll, #f);
 
 	DECL_D3D_API(D3D12CreateDevice);
 	DECL_D3D_API(D3D12GetDebugInterface);
@@ -1142,7 +1454,7 @@ bool init(void* hwnd, u32 flags) {
 
 	if (d3d.device->CreateCommandQueue(&desc, IID_PPV_ARGS(&d3d.cmd_queue)) != S_OK) return false;
 
-	if (!d3d.srv_heap.init(d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_DESCRIPTORS, 4096)) return false;
+	if (!d3d.srv_heap.init(d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_DESCRIPTORS, 8192)) return false;
 	if (!d3d.sampler_heap.init(d3d.device, 2048)) return false;
 	if (!d3d.rtv_heap.init(d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1024, 0)) return false;
 	if (!d3d.ds_heap.init(d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 256, 0)) return false;
@@ -1171,6 +1483,19 @@ bool init(void* hwnd, u32 flags) {
 	}
 	for (TextureHandle& h : d3d.current_framebuffer.attachments) h = INVALID_TEXTURE;
 
+	d3d.shader_compiler.load(".shader_cache_dx");
+
+	D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
+	queryHeapDesc.Count = QUERY_COUNT;
+	queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+	if (!d3d.device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d.query_heap)) == S_OK) return false;
+	HRESULT freq_hr = d3d.cmd_queue->GetTimestampFrequency(&d3d.query_frequency);
+	if (FAILED(freq_hr)) {
+		logError("gpu") << "failed to get timestamp frequency, GPU timing will most likely be wrong";
+		d3d.query_frequency = 1'000'000'000;
+	}
+
+	d3d.initialized = true;
 	return true;
 }
 
@@ -1185,6 +1510,7 @@ void popDebugGroup() {
 }
 
 void setFramebufferCube(TextureHandle cube, u32 face, u32 mip) {
+	d3d.pso_cache.last = nullptr;
 	// d3d.current_framebuffer.count = 0;
 	// d3d.current_framebuffer.depth_stencil = nullptr;
 	// Texture& t = d3d.textures[cube.value];
@@ -1228,6 +1554,7 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip) {
 
 void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle depth_stencil, u32 flags) {
 	checkThread();
+	d3d.pso_cache.last = nullptr;
 
 	for (TextureHandle& texture : d3d.current_framebuffer.attachments) {
 		if (texture) texture->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -1345,6 +1672,8 @@ void waitFrame(u32 frame_idx) {
 }
 
 u32 swapBuffers() {
+	d3d.srv_dirty = true;
+	d3d.pso_cache.last = nullptr;
 	for (auto& window : d3d.windows) {
 		if (!window.handle) continue;
 
@@ -1352,7 +1681,7 @@ u32 swapBuffers() {
 		switchState(d3d.cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 	}
 
-	d3d.frame->end(d3d.cmd_queue, d3d.cmd_list, d3d.fence, Ref(d3d.fence_value));
+	d3d.frame->end(d3d.cmd_queue, d3d.cmd_list, d3d.fence, d3d.query_heap, Ref(d3d.fence_value));
 	const u32 res = u32(d3d.frame - d3d.frames.begin());
 
 	++d3d.frame;
@@ -1477,7 +1806,7 @@ void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 	}
 
 	if (data) {
-		ID3D12Resource* upload_buffer = createUploadBuffer(d3d.device, data, size);
+		ID3D12Resource* upload_buffer = createBuffer(d3d.device, data, size, D3D12_HEAP_TYPE_UPLOAD);
 		D3D12_RESOURCE_STATES old_state = buffer->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
 		d3d.cmd_list->CopyResource(buffer->resource, upload_buffer);
 		buffer->setState(d3d.cmd_list, old_state);
@@ -1486,7 +1815,7 @@ void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 }
 
 ProgramHandle allocProgramHandle() {
-	Program* p = LUMIX_NEW(*d3d.allocator, Program);
+	Program* p = LUMIX_NEW(*d3d.allocator, Program)(*d3d.allocator);
 	return {p};
 }
 
@@ -1658,7 +1987,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	u64 upload_buffer_size;
 	d3d.device->GetCopyableFootprints(&desc, 0, srd_idx, 0, NULL, NULL, NULL, &upload_buffer_size);
 
-	ID3D12Resource* staging = createUploadBuffer(d3d.device, nullptr, upload_buffer_size);
+	ID3D12Resource* staging = createBuffer(d3d.device, nullptr, upload_buffer_size, D3D12_HEAP_TYPE_UPLOAD);
 
 	UpdateSubresources(d3d.cmd_list, texture.resource, staging, 0, 0, srd_idx, srd);
 
@@ -1836,7 +2165,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		UINT64 upload_buffer_size;
 		d3d.device->GetCopyableFootprints(&desc, 0, idx, 0, NULL, NULL, NULL, &upload_buffer_size);
 
-		ID3D12Resource* staging = createUploadBuffer(d3d.device, nullptr, upload_buffer_size);
+		ID3D12Resource* staging = createBuffer(d3d.device, nullptr, upload_buffer_size, D3D12_HEAP_TYPE_UPLOAD);
 		D3D12_RESOURCE_STATES old_state = texture.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
 		UpdateSubresources(d3d.cmd_list, texture.resource, staging, 0, 0, idx, srd);
 		texture.setState(d3d.cmd_list, old_state);
@@ -1847,6 +2176,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 void setState(u64 state) {
 	if (state != d3d.current_state) {
+		d3d.pso_cache.last = nullptr;
 		const u8 stencil_ref = u8(state >> 34);
 		d3d.cmd_list->OMSetStencilRef(stencil_ref);
 	}
@@ -1872,6 +2202,7 @@ void viewport(u32 x, u32 y, u32 w, u32 h) {
 
 void useProgram(ProgramHandle handle) {
 	d3d.current_program = handle;
+	d3d.pso_cache.last = nullptr;
 }
 
 void scissor(u32 x, u32 y, u32 w, u32 h) {
@@ -1881,173 +2212,6 @@ void scissor(u32 x, u32 y, u32 w, u32 h) {
 	rect.right = x + w;
 	rect.bottom = y + h;
 	d3d.cmd_list->RSSetScissorRects(1, &rect);
-}
-
-static ID3D12PipelineState* getPipelineStateCompute() {
-	ASSERT(d3d.current_program);
-	Program& p = *d3d.current_program;
-	D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
-	desc.CS = {p.cs->GetBufferPointer(), p.cs->GetBufferSize()};
-	desc.NodeMask = 1;
-	desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
-	desc.pRootSignature = d3d.root_signature;
-
-	u32 hash = crc32(&desc, sizeof(desc));
-	hash = continueCrc32(hash, &d3d.current_program, sizeof(d3d.current_program));
-
-	auto iter = d3d.pipelines.find(hash);
-	if (iter.isValid()) return iter.value();
-
-	ID3D12PipelineState* pso;
-	HRESULT hr = d3d.device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso));
-	ASSERT(hr == S_OK);
-	d3d.pipelines.insert(hash, pso);
-	return pso;
-}
-
-static ID3D12PipelineState* getPipelineState(D3D12_PRIMITIVE_TOPOLOGY_TYPE pt) {
-	ASSERT(d3d.current_program);
-	Program& p = *d3d.current_program;
-	u64 state = d3d.current_state;
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
-	if (p.vs) desc.VS = {p.vs->GetBufferPointer(), p.vs->GetBufferSize()};
-	if (p.ps) desc.PS = {p.ps->GetBufferPointer(), p.ps->GetBufferSize()};
-	if (p.gs) desc.GS = {p.gs->GetBufferPointer(), p.gs->GetBufferSize()};
-
-	desc.PrimitiveTopologyType = pt;
-
-	if (state & u64(StateFlags::CULL_BACK)) {
-		desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-	} else if (state & u64(StateFlags::CULL_FRONT)) {
-		desc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
-	} else {
-		desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-	}
-
-	desc.pRootSignature = d3d.root_signature;
-	desc.RasterizerState.FrontCounterClockwise = TRUE;
-	desc.RasterizerState.FillMode = (state & u64(StateFlags::WIREFRAME)) != 0 ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
-	// TODO scissor
-	desc.RasterizerState.DepthClipEnable = FALSE;
-
-	desc.DepthStencilState.DepthEnable = (state & u64(StateFlags::DEPTH_TEST)) != 0;
-	desc.DepthStencilState.DepthWriteMask = (state & u64(StateFlags::DEPTH_WRITE)) != 0 && desc.DepthStencilState.DepthEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-	desc.DepthStencilState.DepthFunc = (state & u64(StateFlags::DEPTH_TEST)) != 0 ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_ALWAYS;
-
-	const StencilFuncs func = (StencilFuncs)((state >> 30) & 0xf);
-	desc.DepthStencilState.StencilEnable = func != StencilFuncs::DISABLE;
-	if (desc.DepthStencilState.StencilEnable) {
-		desc.DepthStencilState.StencilReadMask = u8(state >> 42);
-		desc.DepthStencilState.StencilWriteMask = u8(state >> 22);
-		D3D12_COMPARISON_FUNC dx_func;
-		switch (func) {
-			case StencilFuncs::ALWAYS: dx_func = D3D12_COMPARISON_FUNC_ALWAYS; break;
-			case StencilFuncs::EQUAL: dx_func = D3D12_COMPARISON_FUNC_EQUAL; break;
-			case StencilFuncs::NOT_EQUAL: dx_func = D3D12_COMPARISON_FUNC_NOT_EQUAL; break;
-			default: ASSERT(false); break;
-		}
-		auto toDXOp = [](StencilOps op) {
-			constexpr D3D12_STENCIL_OP table[] = {D3D12_STENCIL_OP_KEEP,
-				D3D12_STENCIL_OP_ZERO,
-				D3D12_STENCIL_OP_REPLACE,
-				D3D12_STENCIL_OP_INCR_SAT,
-				D3D12_STENCIL_OP_DECR_SAT,
-				D3D12_STENCIL_OP_INVERT,
-				D3D12_STENCIL_OP_INCR,
-				D3D12_STENCIL_OP_DECR};
-			return table[(int)op];
-		};
-		const D3D12_STENCIL_OP sfail = toDXOp(StencilOps((state >> 50) & 0xf));
-		const D3D12_STENCIL_OP zfail = toDXOp(StencilOps((state >> 54) & 0xf));
-		const D3D12_STENCIL_OP zpass = toDXOp(StencilOps((state >> 58) & 0xf));
-
-		desc.DepthStencilState.FrontFace.StencilFailOp = sfail;
-		desc.DepthStencilState.FrontFace.StencilDepthFailOp = zfail;
-		desc.DepthStencilState.FrontFace.StencilPassOp = zpass;
-		desc.DepthStencilState.FrontFace.StencilFunc = dx_func;
-
-		desc.DepthStencilState.BackFace.StencilFailOp = sfail;
-		desc.DepthStencilState.BackFace.StencilDepthFailOp = zfail;
-		desc.DepthStencilState.BackFace.StencilPassOp = zpass;
-		desc.DepthStencilState.BackFace.StencilFunc = dx_func;
-	}
-
-	const u16 blend_bits = u16(state >> 6);
-
-	auto to_dx = [&](BlendFactors factor) -> D3D12_BLEND {
-		static const D3D12_BLEND table[] = {
-			D3D12_BLEND_ZERO,
-			D3D12_BLEND_ONE,
-			D3D12_BLEND_SRC_COLOR,
-			D3D12_BLEND_INV_SRC_COLOR,
-			D3D12_BLEND_SRC_ALPHA,
-			D3D12_BLEND_INV_SRC_ALPHA,
-			D3D12_BLEND_DEST_COLOR,
-			D3D12_BLEND_INV_DEST_COLOR,
-			D3D12_BLEND_DEST_ALPHA,
-			D3D12_BLEND_INV_DEST_ALPHA,
-			D3D12_BLEND_SRC1_COLOR,
-			D3D12_BLEND_INV_SRC1_COLOR,
-			D3D12_BLEND_SRC1_ALPHA,
-			D3D12_BLEND_INV_SRC1_ALPHA,
-		};
-		ASSERT((u32)factor < lengthOf(table));
-		return table[(int)factor];
-	};
-
-	for (u32 rt_idx = 0; rt_idx < (u32)lengthOf(desc.BlendState.RenderTarget); ++rt_idx) {
-		if (blend_bits) {
-			const BlendFactors src_rgb = (BlendFactors)(blend_bits & 0xf);
-			const BlendFactors dst_rgb = (BlendFactors)((blend_bits >> 4) & 0xf);
-			const BlendFactors src_a = (BlendFactors)((blend_bits >> 8) & 0xf);
-			const BlendFactors dst_a = (BlendFactors)((blend_bits >> 12) & 0xf);
-
-			desc.BlendState.RenderTarget[rt_idx].BlendEnable = true;
-			desc.BlendState.AlphaToCoverageEnable = false;
-			desc.BlendState.RenderTarget[rt_idx].SrcBlend = to_dx(src_rgb);
-			desc.BlendState.RenderTarget[rt_idx].DestBlend = to_dx(dst_rgb);
-			desc.BlendState.RenderTarget[rt_idx].BlendOp = D3D12_BLEND_OP_ADD;
-			desc.BlendState.RenderTarget[rt_idx].SrcBlendAlpha = to_dx(src_a);
-			desc.BlendState.RenderTarget[rt_idx].DestBlendAlpha = to_dx(dst_a);
-			desc.BlendState.RenderTarget[rt_idx].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-			desc.BlendState.RenderTarget[rt_idx].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-		} else {
-			desc.BlendState.RenderTarget[rt_idx].BlendEnable = false;
-			desc.BlendState.RenderTarget[rt_idx].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			desc.BlendState.RenderTarget[rt_idx].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-			desc.BlendState.RenderTarget[rt_idx].BlendOp = D3D12_BLEND_OP_ADD;
-			desc.BlendState.RenderTarget[rt_idx].SrcBlendAlpha = D3D12_BLEND_SRC_ALPHA;
-			desc.BlendState.RenderTarget[rt_idx].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-			desc.BlendState.RenderTarget[rt_idx].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-			desc.BlendState.RenderTarget[rt_idx].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-		}
-	}
-
-	desc.SampleDesc.Count = 1;
-	desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
-	desc.NodeMask = 1;
-	desc.SampleMask = 0xffFFffFF;
-
-	desc.InputLayout.NumElements = p.attribute_count;
-	desc.InputLayout.pInputElementDescs = p.attributes;
-
-	desc.DSVFormat = d3d.current_framebuffer.ds_format;
-	desc.NumRenderTargets = d3d.current_framebuffer.count;
-	for (u32 i = 0; i < d3d.current_framebuffer.count; ++i) {
-		desc.RTVFormats[i] = d3d.current_framebuffer.formats[i];
-	}
-
-	u32 hash = crc32(&desc, sizeof(desc));
-	hash = continueCrc32(hash, &d3d.current_program, sizeof(d3d.current_program));
-
-	auto iter = d3d.pipelines.find(hash);
-	if (iter.isValid()) return iter.value();
-
-	ID3D12PipelineState* pso;
-	HRESULT hr = d3d.device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso));
-	ASSERT(hr == S_OK);
-	d3d.pipelines.insert(hash, pso);
-	return pso;
 }
 
 void drawTriangles(u32 indices_count, DataType index_type) {
@@ -2078,7 +2242,7 @@ void drawArrays(u32 offset, u32 count, PrimitiveType type) {
 		default: ASSERT(0); break;
 	}
 
-	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
+	d3d.cmd_list->SetPipelineState(d3d.pso_cache.getPipelineState(d3d.device, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt));
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
@@ -2127,6 +2291,7 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags) {
 	ASSERT(binding_point < 10);
 	d3d.current_srvs[binding_point].texture = INVALID_TEXTURE;
 	d3d.current_srvs[binding_point].buffer = buffer;
+	d3d.srv_dirty = true;
 }
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
@@ -2153,7 +2318,7 @@ void bindIndexBuffer(BufferHandle handle) {
 
 void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
 	ASSERT(d3d.current_program);
-	d3d.cmd_list->SetPipelineState(getPipelineStateCompute());
+	d3d.cmd_list->SetPipelineState(d3d.pso_cache.getPipelineStateCompute(d3d.device, d3d.root_signature, d3d.current_program));
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 
@@ -2185,6 +2350,7 @@ void bindImageTexture(TextureHandle handle, u32 unit) {
 	if (handle) {
 		handle->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	}
+	d3d.srv_dirty = true;
 }
 
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
@@ -2192,13 +2358,14 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 		d3d.current_srvs[i + offset].buffer = INVALID_BUFFER;
 		d3d.current_srvs[i + offset].texture = handles[i];
 	}
+	d3d.srv_dirty = true;
 }
 
 void drawIndirect(DataType index_type) {
 	ASSERT(d3d.current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
+	d3d.cmd_list->SetPipelineState(d3d.pso_cache.getPipelineState(d3d.device, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt));
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2249,7 +2416,7 @@ void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
 	ASSERT(d3d.current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
+	d3d.cmd_list->SetPipelineState(d3d.pso_cache.getPipelineState(d3d.device, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt));
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
@@ -2265,7 +2432,7 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 	ASSERT(d3d.current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
+	d3d.pso_cache.set(d3d.device, d3d.cmd_list, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt);
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2289,11 +2456,13 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 	d3d.cmd_list->IASetIndexBuffer(&ibv);
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
-	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-
-	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
-	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+	if (d3d.srv_dirty) {
+		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+		D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+		d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+		d3d.srv_dirty = false;
+	}
 
 	d3d.cmd_list->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
@@ -2321,7 +2490,7 @@ void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, Dat
 		default: ASSERT(0); break;
 	}
 
-	d3d.cmd_list->SetPipelineState(getPipelineState(ptt));
+	d3d.cmd_list->SetPipelineState(d3d.pso_cache.getPipelineState(d3d.device, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt));
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2380,340 +2549,21 @@ void update(BufferHandle buffer, const void* data, size_t size) {
 	d3d.frame->scratch_buffer_ptr += size;
 }
 
-static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
-	switch (attr.type) {
-		case AttributeType::FLOAT:
-			switch (attr.components_count) {
-				case 1: return DXGI_FORMAT_R32_FLOAT;
-				case 2: return DXGI_FORMAT_R32G32_FLOAT;
-				case 3: return DXGI_FORMAT_R32G32B32_FLOAT;
-				case 4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
-			}
-			break;
-		case AttributeType::I8:
-			switch (attr.components_count) {
-				case 1: return DXGI_FORMAT_R8_SNORM;
-				case 2: return DXGI_FORMAT_R8G8_SNORM;
-				case 4: return DXGI_FORMAT_R8G8B8A8_SNORM;
-			}
-			break;
-		case AttributeType::U8:
-			switch (attr.components_count) {
-				case 1: return DXGI_FORMAT_R8_UNORM;
-				case 2: return DXGI_FORMAT_R8G8_UNORM;
-				case 4: return DXGI_FORMAT_R8G8B8A8_UNORM;
-			}
-			break;
-		case AttributeType::I16:
-			switch (attr.components_count) {
-				case 4: return DXGI_FORMAT_R16G16B16A16_SINT;
-			}
-			break;
-	}
-	ASSERT(false);
-	return DXGI_FORMAT_R32_FLOAT;
-}
-
-static const TBuiltInResource DefaultTBuiltInResource = {/* .MaxLights = */ 32,
-	/* .MaxClipPlanes = */ 6,
-	/* .MaxTextureUnits = */ 32,
-	/* .MaxTextureCoords = */ 32,
-	/* .MaxVertexAttribs = */ 64,
-	/* .MaxVertexUniformComponents = */ 4096,
-	/* .MaxVaryingFloats = */ 64,
-	/* .MaxVertexTextureImageUnits = */ 32,
-	/* .MaxCombinedTextureImageUnits = */ 80,
-	/* .MaxTextureImageUnits = */ 32,
-	/* .MaxFragmentUniformComponents = */ 4096,
-	/* .MaxDrawBuffers = */ 32,
-	/* .MaxVertexUniformVectors = */ 128,
-	/* .MaxVaryingVectors = */ 8,
-	/* .MaxFragmentUniformVectors = */ 16,
-	/* .MaxVertexOutputVectors = */ 16,
-	/* .MaxFragmentInputVectors = */ 15,
-	/* .MinProgramTexelOffset = */ -8,
-	/* .MaxProgramTexelOffset = */ 7,
-	/* .MaxClipDistances = */ 8,
-	/* .MaxComputeWorkGroupCountX = */ 65535,
-	/* .MaxComputeWorkGroupCountY = */ 65535,
-	/* .MaxComputeWorkGroupCountZ = */ 65535,
-	/* .MaxComputeWorkGroupSizeX = */ 1024,
-	/* .MaxComputeWorkGroupSizeY = */ 1024,
-	/* .MaxComputeWorkGroupSizeZ = */ 64,
-	/* .MaxComputeUniformComponents = */ 1024,
-	/* .MaxComputeTextureImageUnits = */ 16,
-	/* .MaxComputeImageUniforms = */ 8,
-	/* .MaxComputeAtomicCounters = */ 8,
-	/* .MaxComputeAtomicCounterBuffers = */ 1,
-	/* .MaxVaryingComponents = */ 60,
-	/* .MaxVertexOutputComponents = */ 64,
-	/* .MaxGeometryInputComponents = */ 64,
-	/* .MaxGeometryOutputComponents = */ 128,
-	/* .MaxFragmentInputComponents = */ 128,
-	/* .MaxImageUnits = */ 8,
-	/* .MaxCombinedImageUnitsAndFragmentOutputs = */ 8,
-	/* .MaxCombinedShaderOutputResources = */ 8,
-	/* .MaxImageSamples = */ 0,
-	/* .MaxVertexImageUniforms = */ 0,
-	/* .MaxTessControlImageUniforms = */ 0,
-	/* .MaxTessEvaluationImageUniforms = */ 0,
-	/* .MaxGeometryImageUniforms = */ 0,
-	/* .MaxFragmentImageUniforms = */ 8,
-	/* .MaxCombinedImageUniforms = */ 8,
-	/* .MaxGeometryTextureImageUnits = */ 16,
-	/* .MaxGeometryOutputVertices = */ 256,
-	/* .MaxGeometryTotalOutputComponents = */ 1024,
-	/* .MaxGeometryUniformComponents = */ 1024,
-	/* .MaxGeometryVaryingComponents = */ 64,
-	/* .MaxTessControlInputComponents = */ 128,
-	/* .MaxTessControlOutputComponents = */ 128,
-	/* .MaxTessControlTextureImageUnits = */ 16,
-	/* .MaxTessControlUniformComponents = */ 1024,
-	/* .MaxTessControlTotalOutputComponents = */ 4096,
-	/* .MaxTessEvaluationInputComponents = */ 128,
-	/* .MaxTessEvaluationOutputComponents = */ 128,
-	/* .MaxTessEvaluationTextureImageUnits = */ 16,
-	/* .MaxTessEvaluationUniformComponents = */ 1024,
-	/* .MaxTessPatchComponents = */ 120,
-	/* .MaxPatchVertices = */ 32,
-	/* .MaxTessGenLevel = */ 64,
-	/* .MaxViewports = */ 16,
-	/* .MaxVertexAtomicCounters = */ 0,
-	/* .MaxTessControlAtomicCounters = */ 0,
-	/* .MaxTessEvaluationAtomicCounters = */ 0,
-	/* .MaxGeometryAtomicCounters = */ 0,
-	/* .MaxFragmentAtomicCounters = */ 8,
-	/* .MaxCombinedAtomicCounters = */ 8,
-	/* .MaxAtomicCounterBindings = */ 1,
-	/* .MaxVertexAtomicCounterBuffers = */ 0,
-	/* .MaxTessControlAtomicCounterBuffers = */ 0,
-	/* .MaxTessEvaluationAtomicCounterBuffers = */ 0,
-	/* .MaxGeometryAtomicCounterBuffers = */ 0,
-	/* .MaxFragmentAtomicCounterBuffers = */ 1,
-	/* .MaxCombinedAtomicCounterBuffers = */ 1,
-	/* .MaxAtomicCounterBufferSize = */ 16384,
-	/* .MaxTransformFeedbackBuffers = */ 4,
-	/* .MaxTransformFeedbackInterleavedComponents = */ 64,
-	/* .MaxCullDistances = */ 8,
-	/* .MaxCombinedClipAndCullDistances = */ 8,
-	/* .MaxSamples = */ 4,
-	/* .maxMeshOutputVerticesNV = */ 256,
-	/* .maxMeshOutputPrimitivesNV = */ 512,
-	/* .maxMeshWorkGroupSizeX_NV = */ 32,
-	/* .maxMeshWorkGroupSizeY_NV = */ 1,
-	/* .maxMeshWorkGroupSizeZ_NV = */ 1,
-	/* .maxTaskWorkGroupSizeX_NV = */ 32,
-	/* .maxTaskWorkGroupSizeY_NV = */ 1,
-	/* .maxTaskWorkGroupSizeZ_NV = */ 1,
-	/* .maxMeshViewCountNV = */ 4,
-
-	/* .limits = */
-	{
-		/* .nonInductiveForLoops = */ 1,
-		/* .whileLoops = */ 1,
-		/* .doWhileLoops = */ 1,
-		/* .generalUniformIndexing = */ 1,
-		/* .generalAttributeMatrixVectorIndexing = */ 1,
-		/* .generalVaryingIndexing = */ 1,
-		/* .generalSamplerIndexing = */ 1,
-		/* .generalVariableIndexing = */ 1,
-		/* .generalConstantMatrixVectorIndexing = */ 1,
-	}};
-
-static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out, Ref<Program> program) {
-	glslang::TProgram p;
-	EShLanguage lang = EShLangVertex;
-	switch (type) {
-		case ShaderType::COMPUTE: lang = EShLangCompute; break;
-		case ShaderType::FRAGMENT: lang = EShLangFragment; break;
-		case ShaderType::VERTEX: lang = EShLangVertex; break;
-		case ShaderType::GEOMETRY: lang = EShLangGeometry; break;
-		default: ASSERT(false); break;
-	}
-
-	glslang::TShader shader(lang);
-	shader.setStrings(srcs, count);
-	shader.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientOpenGL, 430);
-	shader.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetClientVersion::EShTargetOpenGL_450);
-	shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetLanguageVersion::EShTargetSpv_1_4);
-	auto res2 = shader.parse(&DefaultTBuiltInResource, 430, false, EShMsgDefault);
-	const char* log = shader.getInfoLog();
-	if (!res2) {
-		logError("Renderer") << shader_name << ": " << log;
-	}
-	p.addShader(&shader);
-	auto res = p.link(EShMsgDefault);
-	if (res2 && res) {
-		auto im = p.getIntermediate(lang);
-		std::vector<unsigned int> spirv;
-		spv::SpvBuildLogger logger;
-		glslang::SpvOptions spvOptions;
-		spvOptions.generateDebugInfo = true;
-		spvOptions.disableOptimizer = true;
-		spvOptions.optimizeSize = false;
-		spvOptions.disassemble = false;
-		spvOptions.validate = true;
-		glslang::GlslangToSpv(*im, spirv, &logger, &spvOptions);
-
-		spirv_cross::CompilerHLSL hlsl(spirv);
-		spirv_cross::CompilerHLSL::Options options;
-		options.shader_model = 50;
-		hlsl.set_hlsl_options(options);
-
-		const spirv_cross::VariableID num_workgroups_builtin_id = hlsl.remap_num_workgroups_builtin();
-		if (num_workgroups_builtin_id != spirv_cross::VariableID(0)) {
-			logError("Renderer") << shader_name
-								 << ": there's no hlsl equivalent to gl_NumWorkGroups, use "
-									"user-provided uniforms instead.";
-			return false;
-		}
-		out = hlsl.compile();
-
-		spirv_cross::ShaderResources resources = hlsl.get_shader_resources();
-		
-		for (spirv_cross::Resource& resource : resources.storage_buffers) {
-			const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
-			spirv_cross::Bitset flags = hlsl.get_buffer_block_flags(resource.id);
-			const bool readonly = flags.get(spv::DecorationNonWritable);
-			if (readonly) {
-				program->readonly_binding_flags |= 1 << binding;
-			}
-			else {
-				program->readonly_binding_flags &= ~(1 << binding);
-			}
-		}
-
-		for (spirv_cross::Resource& resource : resources.storage_images) {
-			const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
-			spirv_cross::Bitset flags = hlsl.get_decoration_bitset(resource.id);
-			const bool readonly = flags.get(spv::DecorationNonWritable);
-			if (readonly) {
-				program->readonly_binding_flags |= 1 << binding;
-			}
-			else {
-				program->readonly_binding_flags &= ~(1 << binding);
-			}
-		}
-
-		return true;
-	}
-	return false;
-}
-
-bool createProgram(ProgramHandle handle, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name) {
-	ASSERT(handle);
-	Program& program = *handle;
+bool createProgram(ProgramHandle program
+	, const VertexDecl& decl
+	, const char** srcs
+	, const ShaderType* types
+	, u32 num
+	, const char** prefixes
+	, u32 prefixes_count
+	, const char* name)
+{
+	ASSERT(program);
 	#ifdef LUMIX_DEBUG
-		program.name = name;
+		program->name = name;
 	#endif
-	void* vs_bytecode = nullptr;
-	size_t vs_bytecode_len = 0;
-
-	static const char* attr_defines[] = {"#define _HAS_ATTR0\n",
-		"#define _HAS_ATTR1\n",
-		"#define _HAS_ATTR2\n",
-		"#define _HAS_ATTR3\n",
-		"#define _HAS_ATTR4\n",
-		"#define _HAS_ATTR5\n",
-		"#define _HAS_ATTR6\n",
-		"#define _HAS_ATTR7\n",
-		"#define _HAS_ATTR8\n",
-		"#define _HAS_ATTR9\n",
-		"#define _HAS_ATTR10\n",
-		"#define _HAS_ATTR11\n",
-		"#define _HAS_ATTR12\n"};
-
-	const char* tmp[128];
-	auto filter_srcs = [&](ShaderType type) -> u32 {
-		switch (type) {
-			case ShaderType::COMPUTE: tmp[0] = "#define LUMIX_COMPUTE_SHADER\n"; break;
-			case ShaderType::GEOMETRY: tmp[0] = "#define LUMIX_GEOMETRY_SHADER\n"; break;
-			case ShaderType::FRAGMENT: tmp[0] = "#define LUMIX_FRAGMENT_SHADER\n"; break;
-			case ShaderType::VERTEX: tmp[0] = "#define LUMIX_VERTEX_SHADER\n"; break;
-			default: ASSERT(false); return 0;
-		}
-		for (u32 i = 0; i < prefixes_count; ++i) {
-			tmp[i + 1] = prefixes[i];
-		}
-		for (u32 i = 0; i < decl.attributes_count; ++i) {
-			tmp[i + 1 + prefixes_count] = attr_defines[decl.attributes[i].idx];
-		}
-
-		u32 sc = 0;
-		for (u32 i = 0; i < num; ++i) {
-			if (types[i] != type) continue;
-			tmp[prefixes_count + decl.attributes_count + sc + 1] = srcs[i];
-			++sc;
-		}
-		return sc ? sc + prefixes_count + decl.attributes_count + 1 : 0;
-	};
-	//
-	auto compile = [&](const char* src, ShaderType type, ID3DBlob** out) {
-		// TODO cleanup
-		ID3DBlob* output = NULL;
-		ID3DBlob* errors = NULL;
-		*out = nullptr;
-		HRESULT hr = D3DCompile(src,
-			strlen(src) + 1,
-			name,
-			NULL,
-			NULL,
-			"main",
-			type == ShaderType::VERTEX ? "vs_5_0" : (type == ShaderType::COMPUTE ? "cs_5_0" : "ps_5_0"),
-			D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_DEBUG,
-			0,
-			&output,
-			&errors);
-		if (errors) {
-			if (SUCCEEDED(hr)) {
-				logInfo("gpu") << (LPCSTR)errors->GetBufferPointer();
-			} else {
-				logError("gpu") << (LPCSTR)errors->GetBufferPointer();
-			}
-			errors->Release();
-			if (FAILED(hr)) return false;
-		}
-		ASSERT(output);
-		*out = output;
-		return true;
-	};
-
-	auto compile_stage = [&](ShaderType type, ID3DBlob** out) -> bool {
-		const u32 c = filter_srcs(type);
-		if (c == 0) {
-			*out = nullptr;
-			return true;
-		}
-		if (c > (u32)prefixes_count + decl.attributes_count) {
-			std::string hlsl;
-			if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(program))) {
-				return false;
-			}
-			return compile(hlsl.c_str(), type, out);
-		}
-		return false;
-	};
-
-	bool compiled = compile_stage(ShaderType::VERTEX, &program.vs);
-	compiled = compiled && compile_stage(ShaderType::FRAGMENT, &program.ps);
-	compiled = compiled && compile_stage(ShaderType::COMPUTE, &program.cs);
-	compiled = compiled && compile_stage(ShaderType::GEOMETRY, &program.gs);
-	if (!compiled) return false;
-
-	program.attribute_count = decl.attributes_count;
-	for (u8 i = 0; i < decl.attributes_count; ++i) {
-		const Attribute& attr = decl.attributes[i];
-		const bool instanced = attr.flags & Attribute::INSTANCED;
-		program.attributes[i].AlignedByteOffset = attr.byte_offset;
-		program.attributes[i].Format = getDXGIFormat(attr);
-		program.attributes[i].SemanticIndex = attr.idx;
-		program.attributes[i].SemanticName = "TEXCOORD";
-		program.attributes[i].InputSlot = instanced ? 1 : 0;
-		program.attributes[i].InputSlotClass = instanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-		program.attributes[i].InstanceDataStepRate = instanced ? 1 : 0;
-	}
-
-	return true;
+	ShaderCompiler::Input args { decl, Span(srcs, num), Span(types, num), Span(prefixes, prefixes_count) };
+	return d3d.shader_compiler.compile(decl, args, name, Ref(*program));
 }
 
 } // namespace gpu

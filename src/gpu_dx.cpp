@@ -10,18 +10,17 @@
 #include "engine/os.h"
 #include "engine/sync.h"
 #include "engine/stream.h"
+#include "shader_compiler.h"
 #include <Windows.h>
 #include <d3d11_1.h>
 #include <dxgi.h>
 #include <dxgi1_6.h>
-#include <d3dcompiler.h>
 #include <cassert>
 #include <malloc.h>
 #include "renderer/gpu/dds.h"
 #include "renderer/gpu/renderdoc_app.h"
 #include "stb/stb_image_resize.h"
 
-#pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "glslang.lib")
 #pragma comment(lib, "OSDependent.lib")
 #pragma comment(lib, "OGLCompiler.lib")
@@ -213,176 +212,10 @@ struct InputLayout {
 	ID3D11InputLayout* layout;
 };
 
-static const TBuiltInResource DefaultTBuiltInResource = {
-	/* .MaxLights = */ 32,
-	/* .MaxClipPlanes = */ 6,
-	/* .MaxTextureUnits = */ 32,
-	/* .MaxTextureCoords = */ 32,
-	/* .MaxVertexAttribs = */ 64,
-	/* .MaxVertexUniformComponents = */ 4096,
-	/* .MaxVaryingFloats = */ 64,
-	/* .MaxVertexTextureImageUnits = */ 32,
-	/* .MaxCombinedTextureImageUnits = */ 80,
-	/* .MaxTextureImageUnits = */ 32,
-	/* .MaxFragmentUniformComponents = */ 4096,
-	/* .MaxDrawBuffers = */ 32,
-	/* .MaxVertexUniformVectors = */ 128,
-	/* .MaxVaryingVectors = */ 8,
-	/* .MaxFragmentUniformVectors = */ 16,
-	/* .MaxVertexOutputVectors = */ 16,
-	/* .MaxFragmentInputVectors = */ 15,
-	/* .MinProgramTexelOffset = */ -8,
-	/* .MaxProgramTexelOffset = */ 7,
-	/* .MaxClipDistances = */ 8,
-	/* .MaxComputeWorkGroupCountX = */ 65535,
-	/* .MaxComputeWorkGroupCountY = */ 65535,
-	/* .MaxComputeWorkGroupCountZ = */ 65535,
-	/* .MaxComputeWorkGroupSizeX = */ 1024,
-	/* .MaxComputeWorkGroupSizeY = */ 1024,
-	/* .MaxComputeWorkGroupSizeZ = */ 64,
-	/* .MaxComputeUniformComponents = */ 1024,
-	/* .MaxComputeTextureImageUnits = */ 16,
-	/* .MaxComputeImageUniforms = */ 8,
-	/* .MaxComputeAtomicCounters = */ 8,
-	/* .MaxComputeAtomicCounterBuffers = */ 1,
-	/* .MaxVaryingComponents = */ 60,
-	/* .MaxVertexOutputComponents = */ 64,
-	/* .MaxGeometryInputComponents = */ 64,
-	/* .MaxGeometryOutputComponents = */ 128,
-	/* .MaxFragmentInputComponents = */ 128,
-	/* .MaxImageUnits = */ 8,
-	/* .MaxCombinedImageUnitsAndFragmentOutputs = */ 8,
-	/* .MaxCombinedShaderOutputResources = */ 8,
-	/* .MaxImageSamples = */ 0,
-	/* .MaxVertexImageUniforms = */ 0,
-	/* .MaxTessControlImageUniforms = */ 0,
-	/* .MaxTessEvaluationImageUniforms = */ 0,
-	/* .MaxGeometryImageUniforms = */ 0,
-	/* .MaxFragmentImageUniforms = */ 8,
-	/* .MaxCombinedImageUniforms = */ 8,
-	/* .MaxGeometryTextureImageUnits = */ 16,
-	/* .MaxGeometryOutputVertices = */ 256,
-	/* .MaxGeometryTotalOutputComponents = */ 1024,
-	/* .MaxGeometryUniformComponents = */ 1024,
-	/* .MaxGeometryVaryingComponents = */ 64,
-	/* .MaxTessControlInputComponents = */ 128,
-	/* .MaxTessControlOutputComponents = */ 128,
-	/* .MaxTessControlTextureImageUnits = */ 16,
-	/* .MaxTessControlUniformComponents = */ 1024,
-	/* .MaxTessControlTotalOutputComponents = */ 4096,
-	/* .MaxTessEvaluationInputComponents = */ 128,
-	/* .MaxTessEvaluationOutputComponents = */ 128,
-	/* .MaxTessEvaluationTextureImageUnits = */ 16,
-	/* .MaxTessEvaluationUniformComponents = */ 1024,
-	/* .MaxTessPatchComponents = */ 120,
-	/* .MaxPatchVertices = */ 32,
-	/* .MaxTessGenLevel = */ 64,
-	/* .MaxViewports = */ 16,
-	/* .MaxVertexAtomicCounters = */ 0,
-	/* .MaxTessControlAtomicCounters = */ 0,
-	/* .MaxTessEvaluationAtomicCounters = */ 0,
-	/* .MaxGeometryAtomicCounters = */ 0,
-	/* .MaxFragmentAtomicCounters = */ 8,
-	/* .MaxCombinedAtomicCounters = */ 8,
-	/* .MaxAtomicCounterBindings = */ 1,
-	/* .MaxVertexAtomicCounterBuffers = */ 0,
-	/* .MaxTessControlAtomicCounterBuffers = */ 0,
-	/* .MaxTessEvaluationAtomicCounterBuffers = */ 0,
-	/* .MaxGeometryAtomicCounterBuffers = */ 0,
-	/* .MaxFragmentAtomicCounterBuffers = */ 1,
-	/* .MaxCombinedAtomicCounterBuffers = */ 1,
-	/* .MaxAtomicCounterBufferSize = */ 16384,
-	/* .MaxTransformFeedbackBuffers = */ 4,
-	/* .MaxTransformFeedbackInterleavedComponents = */ 64,
-	/* .MaxCullDistances = */ 8,
-	/* .MaxCombinedClipAndCullDistances = */ 8,
-	/* .MaxSamples = */ 4,
-	/* .maxMeshOutputVerticesNV = */ 256,
-	/* .maxMeshOutputPrimitivesNV = */ 512,
-	/* .maxMeshWorkGroupSizeX_NV = */ 32,
-	/* .maxMeshWorkGroupSizeY_NV = */ 1,
-	/* .maxMeshWorkGroupSizeZ_NV = */ 1,
-	/* .maxTaskWorkGroupSizeX_NV = */ 32,
-	/* .maxTaskWorkGroupSizeY_NV = */ 1,
-	/* .maxTaskWorkGroupSizeZ_NV = */ 1,
-	/* .maxMeshViewCountNV = */ 4,
-
-	/* .limits = */ {
-		/* .nonInductiveForLoops = */ 1,
-		/* .whileLoops = */ 1,
-		/* .doWhileLoops = */ 1,
-		/* .generalUniformIndexing = */ 1,
-		/* .generalAttributeMatrixVectorIndexing = */ 1,
-		/* .generalVaryingIndexing = */ 1,
-		/* .generalSamplerIndexing = */ 1,
-		/* .generalVariableIndexing = */ 1,
-		/* .generalConstantMatrixVectorIndexing = */ 1,
-	}
-};
-
-static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out) {
-	glslang::TProgram p;
-	EShLanguage lang = EShLangVertex;
-	switch(type) {
-		case ShaderType::COMPUTE: lang = EShLangCompute; break;
-		case ShaderType::FRAGMENT: lang = EShLangFragment; break;
-		case ShaderType::VERTEX: lang = EShLangVertex; break;
-		case ShaderType::GEOMETRY: lang = EShLangGeometry; break;
-		default: ASSERT(false); break;
-	}
-
-	glslang::TShader shader(lang);
-	shader.setStrings(srcs, count);
-	shader.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientOpenGL, 430);
-	shader.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetClientVersion::EShTargetOpenGL_450);
-	shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetLanguageVersion::EShTargetSpv_1_4);
-	auto res2 = shader.parse(&DefaultTBuiltInResource, 430, false, EShMsgDefault);
-	const char* log = shader.getInfoLog();
-	if(!res2) {
-		logError("Renderer") << shader_name << ": " << log;
-	}
-	p.addShader(&shader);
-	auto res = p.link(EShMsgDefault);
-	if(res2 && res) {
-		auto im = p.getIntermediate(lang);
-		std::vector<unsigned int> spirv;
-		spv::SpvBuildLogger logger;
-		glslang::SpvOptions spvOptions;
-		spvOptions.generateDebugInfo = true;
-		spvOptions.disableOptimizer = true;
-		spvOptions.optimizeSize = false;
-		spvOptions.disassemble = false;
-		spvOptions.validate = true;
-		glslang::GlslangToSpv(*im, spirv, &logger, &spvOptions);
-
-		spirv_cross::CompilerHLSL hlsl(spirv);
-		spirv_cross::CompilerHLSL::Options options;
-		options.shader_model = 50;
-		hlsl.set_hlsl_options(options);
-		const spirv_cross::VariableID num_workgroups_builtin_id = hlsl.remap_num_workgroups_builtin();
-		if (num_workgroups_builtin_id != spirv_cross::VariableID(0)) {
-			logError("Renderer") << shader_name << ": there's no hlsl equivalent to gl_NumWorkGroups, use user-provided uniforms instead.";
-			return false;
-		}
-		out = hlsl.compile();
-		return true;
-	}
-	return false;
-}
-
-struct ShaderCompiler {
-	ShaderCompiler(IAllocator& allocator)
-		: allocator(allocator)
-		, cache(allocator)
+struct ShaderCompilerDX11 : ShaderCompiler {
+	ShaderCompilerDX11(IAllocator& allocator)
+		: ShaderCompiler(allocator)
 	{}
-
-	static u32 computeHash(const char** srcs, u32 count) {
-		u32 hash = 0;
-		for (u32 i = 0; i < count; ++i) {
-			hash = continueCrc32(hash, srcs[i]);
-		}
-		return hash;
-	}
 
 	static bool create(ID3D11Device* device, ShaderType type, const void* ptr, size_t len, Ref<Program> program) {
 		HRESULT hr;
@@ -397,120 +230,35 @@ struct ShaderCompiler {
 	}
 
 	bool compile(ID3D11Device* device
-		, const VertexDecl& decl
-		, const char** srcs
-		, const ShaderType* types
-		, u32 num
-		, const char** prefixes
-		, u32 prefixes_count
+		, const Input& input
 		, const char* name
 		, Ref<Program> program)
 	{
-		static const char* attr_defines[] = {
-			"#define _HAS_ATTR0\n",
-			"#define _HAS_ATTR1\n",
-			"#define _HAS_ATTR2\n",
-			"#define _HAS_ATTR3\n",
-			"#define _HAS_ATTR4\n",
-			"#define _HAS_ATTR5\n",
-			"#define _HAS_ATTR6\n",
-			"#define _HAS_ATTR7\n",
-			"#define _HAS_ATTR8\n",
-			"#define _HAS_ATTR9\n",
-			"#define _HAS_ATTR10\n",
-			"#define _HAS_ATTR11\n",
-			"#define _HAS_ATTR12\n"
-		};
-
-		const char* tmp[128];
-		auto filter_srcs = [&](ShaderType type) -> u32 {
-			switch (type) {
-				case ShaderType::COMPUTE: tmp[0] = "#define LUMIX_COMPUTE_SHADER\n"; break;
-				case ShaderType::GEOMETRY: tmp[0] = "#define LUMIX_GEOMETRY_SHADER\n"; break;
-				case ShaderType::FRAGMENT: tmp[0] = "#define LUMIX_FRAGMENT_SHADER\n"; break;
-				case ShaderType::VERTEX: tmp[0] = "#define LUMIX_VERTEX_SHADER\n"; break;
-				default: ASSERT(false); return 0;
-			}
-			for(u32 i = 0; i < prefixes_count; ++i) {
-				tmp[i + 1] = prefixes[i];
-			}
-			for (u32 i = 0; i < decl.attributes_count; ++i) {
-				tmp[i + 1 + prefixes_count] = attr_defines[decl.attributes[i].idx]; 
-			}
-
-			u32 sc = 0;
-			for(u32 i = 0; i < num; ++i) {
-				if(types[i] != type) continue;
-				tmp[prefixes_count + decl.attributes_count + sc + 1] = srcs[i];
-				++sc;
-			}
-			return sc ? sc + prefixes_count + decl.attributes_count + 1 : 0;
-		};
-	
-		auto compile = [&](u32 hash, const char* src, ShaderType type) -> ID3DBlob* {
-			// TODO cleanup
-			ID3DBlob* output = NULL;
-			ID3DBlob* errors = NULL;
-
-			HRESULT hr = D3DCompile(src
-				, strlen(src) + 1
-				, name
-				, NULL
-				, NULL
-				, "main"
-				, type == ShaderType::VERTEX ? "vs_5_0" : (type == ShaderType::COMPUTE ? "cs_5_0" : "ps_5_0")
-				, D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_DEBUG
-				, 0
-				, &output
-				, &errors);
-			if (errors) {
-				if (SUCCEEDED(hr)) {
-					logInfo("gpu") << (LPCSTR)errors->GetBufferPointer();
-				}
-				else {
-					logError("gpu") << (LPCSTR)errors->GetBufferPointer();
-				}
-				errors->Release();
-				if (FAILED(hr)) return false;
-			}
-			ASSERT(output);
-
-			void* ptr = output->GetBufferPointer();
-			size_t len = output->GetBufferSize();
-
-			bool created = create(device, type, ptr, len, program);
-			if (created) {
-				OutputMemoryStream tmp(allocator);
-				tmp.write(ptr, len);
-				cache.insert(hash, tmp);
-				return output;
-			}
-			output->Release();
-			return nullptr;
-		};
-
 		auto compile_stage = [&](ShaderType type){
-			const u32 c = filter_srcs(type);
+			const char* tmp[128];
+			const u32 c = filter(input, type, tmp);
 			if (c == 0) return true;
-			if (c > (u32)prefixes_count + decl.attributes_count) {
+			if (c > (u32)input.prefixes.length() + input.decl.attributes_count) {
 				const u32 hash = computeHash(tmp, c);
-				auto iter = cache.find(hash);
+				auto iter = m_cache.find(hash);
 				if (iter.isValid()) {
 					if (!create(device, type, iter.value().data(), iter.value().size(), program)) return false;
 					if (type == ShaderType::VERTEX) {
 						const OutputMemoryStream& data = iter.value();
-						createInputLayout(device, decl, data.data(), data.size(), program);
+						createInputLayout(device, input.decl, data.data(), data.size(), program);
 					}
 					return true;
 				}
 				std::string hlsl;
-				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl))) {
+				u32 dummy;
+				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(dummy))) {
 					return false;
 				}
-				ID3DBlob* blob = compile(hash, hlsl.c_str(), type);
+				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name);
 				if (!blob) return false;
+				if (!create(device, type, blob->GetBufferPointer(), blob->GetBufferSize(), program)) return false;
 				if (type == ShaderType::VERTEX) {
-					createInputLayout(device, decl, blob->GetBufferPointer(), blob->GetBufferSize(), program);
+					createInputLayout(device, input.decl, blob->GetBufferPointer(), blob->GetBufferSize(), program);
 				}
 				blob->Release();
 				return true;
@@ -560,43 +308,6 @@ struct ShaderCompiler {
 			program->il = nullptr;
 		}
 	}
-
-	void save() {
-		OS::OutputFile file;
-		if (file.open(".shader_cache_dx11")) {
-			for (auto iter = cache.begin(), end = cache.end(); iter != end; ++iter) {
-				const u32 hash = iter.key();
-				const u32 size = (u32)iter.value().size();
-				file.write(&hash, sizeof(hash));
-				file.write(&size, sizeof(size));
-				file.write(iter.value().data(), size);
-			}
-			file.close();
-		}
-	}
-
-	void load() {
-		OS::InputFile file;
-		if (file.open(".shader_cache_dx11")) {
-			u32 hash;
-			while (file.read(&hash, sizeof(hash))) {
-				u32 size;
-				if (file.read(&size, sizeof(size))) {
-					OutputMemoryStream value(allocator);
-					value.resize(size);
-					if (!file.read(value.getMutableData(), size)) break;
-					cache.insert(hash, value);
-				}
-				else {
-					break;
-				}
-			}
-			file.close();
-		}
-	}
-
-	IAllocator& allocator;
-	HashMap<u32, OutputMemoryStream> cache;
 };
 
 static struct D3D {
@@ -653,7 +364,7 @@ static struct D3D {
 	HMODULE d3d_dll;
 	HMODULE dxgi_dll;
 	ProgramHandle current_program = nullptr;
-	ShaderCompiler shader_compiler;	
+	ShaderCompilerDX11 shader_compiler;	
 	#ifdef LUMIX_DEBUG
 		StaticString<64> debug_group;
 	#endif
@@ -963,7 +674,7 @@ void preinit(IAllocator& allocator, bool load_renderdoc)
 }
 
 void shutdown() {
-	d3d.shader_compiler.save();
+	d3d.shader_compiler.save(".shader_cache_dx");
 
 	ShFinalize();
 
@@ -1161,7 +872,7 @@ bool init(void* hwnd, u32 flags) {
 	d3d.device_ctx->Begin(d3d.disjoint_query);
 	d3d.disjoint_waiting = false;
 
-	d3d.shader_compiler.load();
+	d3d.shader_compiler.load(".shader_cache_dx");
 
 	d3d.initialized = true;
 	return true;
@@ -2428,7 +2139,9 @@ bool createProgram(ProgramHandle program, const VertexDecl& decl, const char** s
 		program->name = name;
 	#endif
 
-	if (!d3d.shader_compiler.compile(d3d.device, decl, srcs, types, num, prefixes, prefixes_count, name, Ref(*program))) return false;
+	ShaderCompiler::Input args { decl, Span(srcs, num), Span(types, num), Span(prefixes, prefixes_count) };
+
+	if (!d3d.shader_compiler.compile(d3d.device, args, name, Ref(*program))) return false;
 	return true;
 }
 
