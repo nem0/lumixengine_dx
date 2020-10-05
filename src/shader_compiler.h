@@ -147,7 +147,7 @@ struct ShaderCompiler {
 		return sc ? sc + input.prefixes.length() + input.decl.attributes_count + 1 : 0;
 	};
 
-	static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out, Ref<u32> readonly_bitset) {
+	static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out, Ref<u32> readonly_bitset, Ref<u32> used_bitset) {
 		readonly_bitset.value = 0xffFFffFF;
 		glslang::TProgram p;
 		EShLanguage lang = EShLangVertex;
@@ -197,11 +197,12 @@ struct ShaderCompiler {
 			}
 			out = hlsl.compile();
 
-			spirv_cross::ShaderResources resources = hlsl.get_shader_resources();
+			spirv_cross::ShaderResources resources = hlsl.get_shader_resources(hlsl.get_active_interface_variables());
 		
 			for (spirv_cross::Resource& resource : resources.storage_buffers) {
 				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
 				spirv_cross::Bitset flags = hlsl.get_buffer_block_flags(resource.id);
+				used_bitset.value |= 1 << binding;
 				const bool readonly = flags.get(spv::DecorationNonWritable);
 				if (readonly) {
 					readonly_bitset.value |= 1 << binding;
@@ -211,9 +212,15 @@ struct ShaderCompiler {
 				}
 			}
 
+			for (spirv_cross::Resource& resource : resources.sampled_images) {
+				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
+				used_bitset.value |= 1 << binding;
+			}
+
 			for (spirv_cross::Resource& resource : resources.storage_images) {
 				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
 				spirv_cross::Bitset flags = hlsl.get_decoration_bitset(resource.id);
+				used_bitset.value |= 1 << binding;
 				const bool readonly = flags.get(spv::DecorationNonWritable);
 				if (readonly) {
 					readonly_bitset.value |= 1 << binding;

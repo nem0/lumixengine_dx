@@ -251,7 +251,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 				}
 				std::string hlsl;
 				u32 dummy;
-				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(dummy))) {
+				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(dummy), Ref(dummy))) {
 					return false;
 				}
 				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name);

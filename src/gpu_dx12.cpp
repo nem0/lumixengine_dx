@@ -203,6 +203,7 @@ struct Program {
 	D3D12_INPUT_ELEMENT_DESC attributes[16];
 	u32 attribute_count = 0;
 	u32 readonly_binding_flags = 0xffFFffFF;
+	u32 used_srvs_flags = 0xffFFffFF;
 	#ifdef LUMIX_DEBUG
 		StaticString<64> name;
 	#endif
@@ -237,7 +238,7 @@ struct Texture {
 	D3D12_RESOURCE_STATES state;
 	u32 heap_id;
 	DXGI_FORMAT dxgi_format;
-	u32 flags;
+	u16 flags;
 	#ifdef LUMIX_DEBUG
 		StaticString<64> name;
 	#endif
@@ -297,7 +298,8 @@ struct PSOCache {
 		, ID3D12RootSignature* root_signature
 		, D3D12_PRIMITIVE_TOPOLOGY_TYPE pt)
 	{
-		if (last) return last;
+		if (last && last_pt == pt) return last;
+		last_pt = pt;
 
 		ASSERT(program);
 		Program& p = *program;
@@ -451,6 +453,7 @@ struct PSOCache {
 
 	HashMap<u32, ID3D12PipelineState*> cache;
 	ID3D12PipelineState* last = nullptr;
+	D3D12_PRIMITIVE_TOPOLOGY_TYPE last_pt;
 };
 
 struct ShaderCompilerDX12 : ShaderCompiler {
@@ -476,6 +479,7 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 		, const char* name
 		, Ref<Program> program)
 	{
+		program->used_srvs_flags = 0;
 		program->attribute_count = decl.attributes_count;
 		for (u8 i = 0; i < decl.attributes_count; ++i) {
 			const Attribute& attr = decl.attributes[i];
@@ -505,7 +509,7 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 				}
 
 				std::string hlsl;
-				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(program->readonly_binding_flags))) {
+				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(program->readonly_binding_flags), Ref(program->used_srvs_flags))) {
 					return false;
 				}
 				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name);
@@ -582,7 +586,7 @@ struct HeapAllocator {
 
 	void copy(ID3D12Device* device, u32 id) {
 		ASSERT(count < max_count);
-		D3D12_CPU_DESCRIPTOR_HANDLE src_cpu = backing_heap->GetCPUDescriptorHandleForHeapStart();
+		D3D12_CPU_DESCRIPTOR_HANDLE src_cpu = backing_cpu_begin;
 		src_cpu.ptr += id * increment;
 		D3D12_CPU_DESCRIPTOR_HANDLE dst_cpu = cpu;
 		dst_cpu.ptr += count * increment;
@@ -645,6 +649,8 @@ struct HeapAllocator {
 			bsrv_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
 			bsrv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 			device->CreateShaderResourceView(nullptr, &bsrv_desc, cpu);
+
+			backing_cpu_begin = backing_heap->GetCPUDescriptorHandleForHeapStart();
 		}
 
 		return true;
@@ -658,6 +664,7 @@ struct HeapAllocator {
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu;
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu_begin;
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu_begin;
+	D3D12_CPU_DESCRIPTOR_HANDLE backing_cpu_begin;
 	HashMap<u32, u32> sampler_map;
 	u32 increment = 0;
 	u32 count = 0;
@@ -727,7 +734,6 @@ struct Frame {
 		scratch_buffer_ptr = scratch_buffer_begin;
 
 		query_buffer = createBuffer(device, nullptr, sizeof(u64) * QUERY_COUNT, D3D12_HEAP_TYPE_READBACK);
-		query_buffer->Map(0, nullptr, (void**)&query_buffer_ptr);
 
 		return true;
 	}
@@ -742,6 +748,7 @@ struct Frame {
 
 	void begin() {
 		wait();
+		query_buffer->Map(0, nullptr, (void**)&query_buffer_ptr);
 
 		for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
 			QueryHandle q = to_resolve[i];
@@ -754,6 +761,7 @@ struct Frame {
 	}
 
 	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12Fence* fence, ID3D12QueryHeap* query_heap, Ref<u64> fence_value) {
+		query_buffer->Unmap(0, nullptr);
 		for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
 			QueryHandle q = to_resolve[i];
 			cmd_list->ResolveQueryData(query_heap, D3D12_QUERY_TYPE_TIMESTAMP, q->idx, 1, query_buffer, i * 8);
@@ -824,7 +832,8 @@ static struct D3D {
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	ProgramHandle current_program = INVALID_PROGRAM;
 	SRV current_srvs[10];
-	bool srv_dirty = true;
+	u32 current_sampler_flags[10] = {};
+	bool dirty_samplers = true;
 	u64 current_state = 0;
 	PSOCache pso_cache;
 	Window windows[64];
@@ -845,8 +854,9 @@ static struct D3D {
 } d3d;
 
 
-static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const SRV* srvs, u32 count) {
-	u32 flags[16];
+LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const SRV* srvs, u32 count) {
+	u16 flags[10];
+	ASSERT(count <= lengthOf(flags));
 	for (u32 i = 0; i < count; ++i) {
 		if (srvs[i].texture) {
 			ASSERT(srvs[i].texture);
@@ -871,7 +881,6 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const S
 	cpu.ptr += heap.count * heap.increment;
 	D3D12_GPU_DESCRIPTOR_HANDLE res = gpu;
 	u32 offset = heap.count * heap.increment;
-	;
 	heap.count += count;
 
 	for (u32 i = 0; i < count; ++i) {
@@ -899,9 +908,11 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const S
 	return res;
 }
 
-static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(const Program& program, HeapAllocator& heap, const SRV* srvs, u32 count) {
+LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(const Program& program, HeapAllocator& heap, const SRV* srvs, u32 count) {
 	D3D12_GPU_DESCRIPTOR_HANDLE res = heap.getGPU();
 	for (u32 i = 0; i < count; ++i) {
+		if ((program.used_srvs_flags & (1 << i)) == 0) continue;
+
 		const bool is_readonly = program.readonly_binding_flags & (1 << i);
 		if (srvs[i].buffer) {
 			Buffer& b = *srvs[i].buffer;
@@ -909,7 +920,6 @@ static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(const Program& program, HeapAllocato
 			b.setState(d3d.cmd_list, is_readonly ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 		} else if (srvs[i].texture) {
 			Texture& t = *srvs[i].texture;
-			const bool is_depth = isDepthFormat(t.dxgi_format);
 			heap.copy(d3d.device, t.resource ? t.heap_id + (is_readonly ? 0 : 1) : 0);
 			if (t.state & D3D12_RESOURCE_STATE_DEPTH_READ) {
 				//t.setState(d3d.cmd_list, D3D12_RESOURCE_STATE_DEPTH_READ);
@@ -1087,6 +1097,7 @@ void destroy(TextureHandle texture) {
 	checkThread();
 	ASSERT(texture);
 	Texture& t = *texture;
+	ASSERT(t.resource != (void*)0xcdcdcdcdcdcdcdcd);
 	if (t.resource) d3d.frame->to_release.push(t.resource);
 	LUMIX_DELETE(*d3d.allocator, texture);
 }
@@ -1428,7 +1439,7 @@ bool init(void* hwnd, u32 flags) {
 		if (SUCCEEDED(hr)) {
 			info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
 			info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
-			info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, true);
+			//info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, true);
 			D3D12_INFO_QUEUE_FILTER filter = {};
 
 			D3D12_MESSAGE_CATEGORY catlist[] = {
@@ -1437,9 +1448,16 @@ bool init(void* hwnd, u32 flags) {
 			filter.DenyList.NumCategories = 0;
 			filter.DenyList.pCategoryList = nullptr;
 
-			D3D12_MESSAGE_ID idlist[] = {D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE, D3D12_MESSAGE_ID_CREATEINPUTLAYOUT_EMPTY_LAYOUT};
-			filter.DenyList.NumIDs = 2;
+			D3D12_MESSAGE_ID idlist[] = {
+				D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE, 
+				D3D12_MESSAGE_ID_CREATEINPUTLAYOUT_EMPTY_LAYOUT,
+				D3D12_MESSAGE_ID_MAP_INVALID_NULLRANGE
+			};
+			filter.DenyList.NumIDs = lengthOf(idlist);
 			filter.DenyList.pIDList = idlist;
+			filter.DenyList.NumSeverities = 1;
+			D3D12_MESSAGE_SEVERITY info_severity = D3D12_MESSAGE_SEVERITY_INFO;
+			filter.DenyList.pSeverityList = &info_severity;
 			info_queue->PushStorageFilter(&filter);
 		}
 	}
@@ -1454,7 +1472,7 @@ bool init(void* hwnd, u32 flags) {
 
 	if (d3d.device->CreateCommandQueue(&desc, IID_PPV_ARGS(&d3d.cmd_queue)) != S_OK) return false;
 
-	if (!d3d.srv_heap.init(d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_DESCRIPTORS, 8192)) return false;
+	if (!d3d.srv_heap.init(d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_DESCRIPTORS, 16384)) return false;
 	if (!d3d.sampler_heap.init(d3d.device, 2048)) return false;
 	if (!d3d.rtv_heap.init(d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1024, 0)) return false;
 	if (!d3d.ds_heap.init(d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 256, 0)) return false;
@@ -1468,6 +1486,7 @@ bool init(void* hwnd, u32 flags) {
 	if (d3d.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, d3d.frames[0].cmd_allocator, NULL, IID_PPV_ARGS(&d3d.cmd_list)) != S_OK) return false;
 	d3d.cmd_list->Close();
 
+	d3d.frame->query_buffer->Map(0, nullptr, (void**)&d3d.frame->query_buffer_ptr);
 	d3d.frame->cmd_allocator->Reset();
 	d3d.cmd_list->Reset(d3d.frame->cmd_allocator, nullptr);
 	d3d.cmd_list->SetGraphicsRootSignature(d3d.root_signature);
@@ -1672,7 +1691,7 @@ void waitFrame(u32 frame_idx) {
 }
 
 u32 swapBuffers() {
-	d3d.srv_dirty = true;
+	d3d.dirty_samplers = true;
 	d3d.pso_cache.last = nullptr;
 	for (auto& window : d3d.windows) {
 		if (!window.handle) continue;
@@ -2201,8 +2220,10 @@ void viewport(u32 x, u32 y, u32 w, u32 h) {
 }
 
 void useProgram(ProgramHandle handle) {
-	d3d.current_program = handle;
-	d3d.pso_cache.last = nullptr;
+	if (handle != d3d.current_program) {
+		d3d.pso_cache.last = nullptr;
+		d3d.current_program = handle;
+	}
 }
 
 void scissor(u32 x, u32 y, u32 w, u32 h) {
@@ -2245,10 +2266,13 @@ void drawArrays(u32 offset, u32 count, PrimitiveType type) {
 	d3d.cmd_list->SetPipelineState(d3d.pso_cache.getPipelineState(d3d.device, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt));
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
-	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	if (d3d.dirty_samplers) {
+		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+		d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d.dirty_samplers = false;
+	}
 
-	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
 
 	d3d.cmd_list->DrawInstanced(count, 1, offset, 0);
@@ -2282,6 +2306,7 @@ void destroy(BufferHandle buffer) {
 	checkThread();
 	ASSERT(buffer);
 	Buffer& t = *buffer;
+	ASSERT(t.resource != (void*)0xcdcdcdcdcdcdcdcd);
 	if (t.resource) d3d.frame->to_release.push(t.resource);
 
 	LUMIX_DELETE(*d3d.allocator, buffer);
@@ -2291,7 +2316,6 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags) {
 	ASSERT(binding_point < 10);
 	d3d.current_srvs[binding_point].texture = INVALID_TEXTURE;
 	d3d.current_srvs[binding_point].buffer = buffer;
-	d3d.srv_dirty = true;
 }
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
@@ -2319,10 +2343,15 @@ void bindIndexBuffer(BufferHandle handle) {
 void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
 	ASSERT(d3d.current_program);
 	d3d.cmd_list->SetPipelineState(d3d.pso_cache.getPipelineStateCompute(d3d.device, d3d.root_signature, d3d.current_program));
-	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	
+	if (d3d.dirty_samplers) {
+		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+		d3d.cmd_list->SetComputeRootDescriptorTable(5, samplers);
+		d3d.dirty_samplers = false;
+	}
+
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 
-	d3d.cmd_list->SetComputeRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetComputeRootDescriptorTable(6, srv);
 	d3d.cmd_list->SetComputeRootDescriptorTable(7, srv);
 	d3d.cmd_list->Dispatch(num_groups_x, num_groups_y, num_groups_z);
@@ -2348,17 +2377,25 @@ void bindImageTexture(TextureHandle handle, u32 unit) {
 	d3d.current_srvs[unit].buffer = INVALID_BUFFER;
 	d3d.current_srvs[unit].texture = handle;
 	if (handle) {
+		if (d3d.current_sampler_flags[unit] != handle->flags) {
+			d3d.current_sampler_flags[unit] = handle->flags;
+			d3d.dirty_samplers = true;
+		}
 		handle->setState(d3d.cmd_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	}
-	d3d.srv_dirty = true;
 }
 
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	for (u32 i = 0; i < count; ++i) {
 		d3d.current_srvs[i + offset].buffer = INVALID_BUFFER;
 		d3d.current_srvs[i + offset].texture = handles[i];
+		if (handles[i]) {
+			if (d3d.current_sampler_flags[i + offset] != handles[i]->flags) {
+				d3d.current_sampler_flags[i + offset] = handles[i]->flags;
+				d3d.dirty_samplers = true;
+			}
+		}
 	}
-	d3d.srv_dirty = true;
 }
 
 void drawIndirect(DataType index_type) {
@@ -2389,10 +2426,13 @@ void drawIndirect(DataType index_type) {
 	d3d.cmd_list->IASetIndexBuffer(&ibv);
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
-	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	if (d3d.dirty_samplers) {
+		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+		d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d.dirty_samplers = false;
+	}
+	
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-
-	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
 
 	static ID3D12CommandSignature* signature = [&]() {
@@ -2419,10 +2459,13 @@ void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
 	d3d.cmd_list->SetPipelineState(d3d.pso_cache.getPipelineState(d3d.device, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt));
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
-	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	if (d3d.dirty_samplers) {
+		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+		d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d.dirty_samplers = false;
+	}
+	
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-
-	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
 
 	d3d.cmd_list->DrawInstanced(indices_count, instances_count, 0, 0);
@@ -2456,13 +2499,14 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 	d3d.cmd_list->IASetIndexBuffer(&ibv);
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
-	if (d3d.srv_dirty) {
+	if (d3d.dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-		D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
 		d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
-		d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
-		d3d.srv_dirty = false;
+		d3d.dirty_samplers = false;
 	}
+	
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
 
 	d3d.cmd_list->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
