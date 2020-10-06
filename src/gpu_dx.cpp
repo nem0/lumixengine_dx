@@ -242,10 +242,10 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 				const u32 hash = computeHash(tmp, c);
 				auto iter = m_cache.find(hash);
 				if (iter.isValid()) {
-					if (!create(device, type, iter.value().data(), iter.value().size(), program)) return false;
+					const ShaderCompiler::CachedShader& s = iter.value();
+					if (!create(device, type, s.data.data(), s.data.size(), program)) return false;
 					if (type == ShaderType::VERTEX) {
-						const OutputMemoryStream& data = iter.value();
-						createInputLayout(device, input.decl, data.data(), data.size(), program);
+						createInputLayout(device, input.decl, s.data.data(), s.data.size(), program);
 					}
 					return true;
 				}
@@ -254,7 +254,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(dummy), Ref(dummy))) {
 					return false;
 				}
-				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name);
+				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name, 0, 0);
 				if (!blob) return false;
 				if (!create(device, type, blob->GetBufferPointer(), blob->GetBufferSize(), program)) return false;
 				if (type == ShaderType::VERTEX) {
@@ -674,7 +674,7 @@ void preinit(IAllocator& allocator, bool load_renderdoc)
 }
 
 void shutdown() {
-	d3d.shader_compiler.save(".shader_cache_dx");
+	d3d.shader_compiler.save(".shader_cache_dx11");
 
 	ShFinalize();
 
@@ -872,7 +872,7 @@ bool init(void* hwnd, u32 flags) {
 	d3d.device_ctx->Begin(d3d.disjoint_query);
 	d3d.disjoint_waiting = false;
 
-	d3d.shader_compiler.load(".shader_cache_dx");
+	d3d.shader_compiler.load(".shader_cache_dx11");
 
 	d3d.initialized = true;
 	return true;

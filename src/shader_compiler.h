@@ -243,7 +243,7 @@ struct ShaderCompiler {
 		return hash;
 	}
 
-	ID3DBlob* compile(u32 hash, const char* src, ShaderType type, const char* name) {
+	ID3DBlob* compile(u32 hash, const char* src, ShaderType type, const char* name, u32 readonly_bitset, u32 used_bitset) {
 		ID3DBlob* output = NULL;
 		ID3DBlob* errors = NULL;
 		HRESULT hr = D3DCompile(src,
@@ -267,21 +267,28 @@ struct ShaderCompiler {
 			if (FAILED(hr)) return nullptr;
 		}
 		ASSERT(output);
-		OutputMemoryStream tmp(m_allocator);
-		tmp.write(output->GetBufferPointer(), output->GetBufferSize());
-		m_cache.insert(hash, tmp);
+		CachedShader cached(m_allocator);
+		cached.data.write(output->GetBufferPointer(), output->GetBufferSize());
+		cached.readonly_bitset = readonly_bitset;
+		cached.used_srvs_bitset = used_bitset;
+		m_cache.insert(hash, static_cast<CachedShader&&>(cached));
 		return output;
 	};
 
 	void save(const char* filename) {
 		OS::OutputFile file;
 		if (file.open(filename)) {
+			u32 version = 0;
+			file.write(&version, sizeof(version));
 			for (auto iter = m_cache.begin(), end = m_cache.end(); iter != end; ++iter) {
 				const u32 hash = iter.key();
-				const u32 size = (u32)iter.value().size();
+				const CachedShader& s = iter.value();
+				const u32 size = (u32)s.data.size();
 				file.write(&hash, sizeof(hash));
 				file.write(&size, sizeof(size));
-				file.write(iter.value().data(), size);
+				file.write(s.data.data(), size);
+				file.write(&s.readonly_bitset, sizeof(s.readonly_bitset));
+				file.write(&s.used_srvs_bitset, sizeof(s.used_srvs_bitset));
 			}
 			file.close();
 		}
@@ -290,13 +297,18 @@ struct ShaderCompiler {
 	void load(const char* filename) {
 		OS::InputFile file;
 		if (file.open(filename)) {
+			u32 version;
+			file.read(&version, sizeof(version));
+			ASSERT(version == 0);
 			u32 hash;
 			while (file.read(&hash, sizeof(hash))) {
 				u32 size;
 				if (file.read(&size, sizeof(size))) {
-					OutputMemoryStream value(m_allocator);
-					value.resize(size);
-					if (!file.read(value.getMutableData(), size)) break;
+					CachedShader value(m_allocator);
+					value.data.resize(size);
+					if (!file.read(value.data.getMutableData(), size)) break;
+					if (!file.read(&value.readonly_bitset, sizeof(value.readonly_bitset))) break;
+					if (!file.read(&value.used_srvs_bitset, sizeof(value.used_srvs_bitset))) break;
 					m_cache.insert(hash, value);
 				} else {
 					break;
@@ -336,7 +348,13 @@ struct ShaderCompiler {
 	}
 
 	IAllocator& m_allocator;
-	HashMap<u32, OutputMemoryStream> m_cache;
+	struct CachedShader {
+		CachedShader(IAllocator& allocator) : data(allocator) {}
+		OutputMemoryStream data;
+		u32 used_srvs_bitset;
+		u32 readonly_bitset;
+	};
+	HashMap<u32, CachedShader> m_cache;
 };
 
 } // namespace Lumix::gpu

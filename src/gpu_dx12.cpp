@@ -51,6 +51,7 @@ static constexpr u32 NUM_BACKBUFFERS = 3;
 static constexpr u32 SCRATCH_BUFFER_SIZE = 4 * 1024 * 1024;
 static constexpr u32 MAX_DESCRIPTORS = 128 * 1024;
 static constexpr u32 QUERY_COUNT = 2048;
+static constexpr u32 INVALID_HEAP_ID = 0xffFFffFF;
 
 template <int N> static void toWChar(WCHAR (&out)[N], const char* in) {
 	const char* c = in;
@@ -222,7 +223,7 @@ struct Buffer {
 	u8* mapped_ptr = nullptr;
 	u32 size = 0;
 	D3D12_RESOURCE_STATES state;
-	u32 heap_id;
+	u32 heap_id = INVALID_HEAP_ID;
 };
 
 struct Texture {
@@ -504,8 +505,9 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 				const u32 hash = computeHash(tmp, c);
 				auto iter = m_cache.find(hash);
 				if (iter.isValid()) {
-					set(type, iter.value().data(), iter.value().size(), program);
-					// TODO set used_srvs_flags and readonly_binding_flags 
+					set(type, iter.value().data.data(), iter.value().data.size(), program);
+					program->readonly_binding_flags = iter.value().readonly_bitset;
+					program->used_srvs_flags = iter.value().used_srvs_bitset;
 					return true;
 				}
 
@@ -513,7 +515,7 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(program->readonly_binding_flags), Ref(program->used_srvs_flags))) {
 					return false;
 				}
-				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name);
+				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name, program->readonly_binding_flags, program->used_srvs_flags);
 				if (!blob) return false;
 				set(type, blob->GetBufferPointer(), blob->GetBufferSize(), program);
 				blob->Release();
@@ -568,6 +570,10 @@ struct HeapAllocator {
 		D3D12_GPU_DESCRIPTOR_HANDLE res = gpu;
 		res.ptr += count * increment;
 		return res;
+	}
+
+	void free(u32 id) {
+		free_list.push(id);
 	}
 
 	u32 alloc(ID3D12Device* device, ID3D12Resource* res, const D3D12_SHADER_RESOURCE_VIEW_DESC& srv_desc, const D3D12_UNORDERED_ACCESS_VIEW_DESC* uav_desc) {
@@ -715,16 +721,11 @@ static ID3D12Resource* createBuffer(ID3D12Device* device, const void* data, u64 
 struct Frame {
 	Frame(IAllocator& allocator)
 		: to_release(allocator)
+		, to_heap_release(allocator)
 		, to_resolve(allocator)
 	{}
 
-	void clear() {
-		for (IUnknown* res : to_release) res->Release();
-		to_release.clear();
-
-		scratch_buffer->Release();
-		query_buffer->Release();
-	}
+	void clear();
 
 	bool init(ID3D12Device* device) {
 		if (device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmd_allocator)) != S_OK) return false;
@@ -747,19 +748,7 @@ struct Frame {
 		fence_event = nullptr;
 	}
 
-	void begin() {
-		wait();
-		query_buffer->Map(0, nullptr, (void**)&query_buffer_ptr);
-
-		for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
-			QueryHandle q = to_resolve[i];
-			memcpy(&q->timestamp, query_buffer_ptr + i * 8, sizeof(q->timestamp));
-		}
-		to_resolve.clear();
-
-		for (IUnknown* res : to_release) res->Release();
-		to_release.clear();
-	}
+	void begin();
 
 	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12Fence* fence, ID3D12QueryHeap* query_heap, Ref<u64> fence_value) {
 		query_buffer->Unmap(0, nullptr);
@@ -787,6 +776,7 @@ struct Frame {
 	u8* scratch_buffer_begin = nullptr;
 	ID3D12CommandAllocator* cmd_allocator = nullptr;
 	Array<IUnknown*> to_release;
+	Array<u32> to_heap_release;
 	HANDLE fence_event = nullptr;
 	Array<Query*> to_resolve;
 	ID3D12Resource* query_buffer;
@@ -853,6 +843,33 @@ static struct D3D {
 	HeapAllocator ds_heap;
 	ShaderCompilerDX12 shader_compiler;
 } d3d;
+
+void Frame::begin() {
+	wait();
+	query_buffer->Map(0, nullptr, (void**)&query_buffer_ptr);
+
+	for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
+		QueryHandle q = to_resolve[i];
+		memcpy(&q->timestamp, query_buffer_ptr + i * 8, sizeof(q->timestamp));
+	}
+	to_resolve.clear();
+
+	for (IUnknown* res : to_release) res->Release();
+	for (u32 i : to_heap_release) d3d.srv_heap.free(i);
+	to_release.clear();
+	to_heap_release.clear();
+}
+
+void Frame::clear() {
+	for (IUnknown* res : to_release) res->Release();
+	for (u32 i : to_heap_release) d3d.srv_heap.free(i);
+		
+	to_release.clear();
+	to_heap_release.clear();
+
+	scratch_buffer->Release();
+	query_buffer->Release();
+}
 
 
 LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const SRV* srvs, u32 count) {
@@ -1100,6 +1117,7 @@ void destroy(TextureHandle texture) {
 	Texture& t = *texture;
 	ASSERT(t.resource != (void*)0xcdcdcdcdcdcdcdcd);
 	if (t.resource) d3d.frame->to_release.push(t.resource);
+	if (t.heap_id != INVALID_HEAP_ID) d3d.frame->to_heap_release.push(t.heap_id);
 	LUMIX_DELETE(*d3d.allocator, texture);
 }
 
@@ -1425,9 +1443,9 @@ bool init(void* hwnd, u32 flags) {
 		if (api_D3D12GetDebugInterface(IID_PPV_ARGS(&d3d.debug)) != S_OK) return false;
 		d3d.debug->EnableDebugLayer();
 
-		ID3D12Debug1* debug1;
-		d3d.debug->QueryInterface(IID_PPV_ARGS(&debug1));
-		debug1->SetEnableGPUBasedValidation(true);
+		//ID3D12Debug1* debug1;
+		//d3d.debug->QueryInterface(IID_PPV_ARGS(&debug1));
+		//debug1->SetEnableGPUBasedValidation(true);
 	}
 
 	D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_0;
@@ -2307,8 +2325,8 @@ void destroy(BufferHandle buffer) {
 	checkThread();
 	ASSERT(buffer);
 	Buffer& t = *buffer;
-	ASSERT(t.resource != (void*)0xcdcdcdcdcdcdcdcd);
 	if (t.resource) d3d.frame->to_release.push(t.resource);
+	if (t.heap_id != INVALID_HEAP_ID) d3d.frame->to_heap_release.push(t.heap_id);
 
 	LUMIX_DELETE(*d3d.allocator, buffer);
 }
