@@ -1879,7 +1879,7 @@ void scissor(u32 x, u32 y, u32 w, u32 h) {
 	d3d.device_ctx->RSSetScissorRects(1, &r);
 }
 
-void drawTriangles(u32 indices_count, DataType index_type) {
+void drawTriangles(u32 bytes_offset, u32 indices_count, DataType index_type) {
 	DXGI_FORMAT dxgi_index_type;
 	switch(index_type) {
 		case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; break;
@@ -1888,7 +1888,7 @@ void drawTriangles(u32 indices_count, DataType index_type) {
 
 	ASSERT(d3d.current_index_buffer);
 	ID3D11Buffer* b = d3d.current_index_buffer->buffer;
-	d3d.device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
+	d3d.device_ctx->IASetIndexBuffer(b, dxgi_index_type, bytes_offset);
 	d3d.device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	d3d.device_ctx->DrawIndexed(indices_count, 0, 0);
 }

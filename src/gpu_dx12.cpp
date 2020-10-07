@@ -1115,7 +1115,6 @@ void destroy(TextureHandle texture) {
 	checkThread();
 	ASSERT(texture);
 	Texture& t = *texture;
-	ASSERT(t.resource != (void*)0xcdcdcdcdcdcdcdcd);
 	if (t.resource) d3d.frame->to_release.push(t.resource);
 	if (t.heap_id != INVALID_HEAP_ID) d3d.frame->to_heap_release.push(t.heap_id);
 	LUMIX_DELETE(*d3d.allocator, texture);
@@ -2254,8 +2253,48 @@ void scissor(u32 x, u32 y, u32 w, u32 h) {
 	d3d.cmd_list->RSSetScissorRects(1, &rect);
 }
 
-void drawTriangles(u32 indices_count, DataType index_type) {
-	drawTrianglesInstanced(indices_count, 1, index_type);
+void drawTrianglesInstancedInternal(u32 offset, u32 indices_count, u32 instances_count, DataType index_type) {
+	ASSERT(d3d.current_program);
+	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	d3d.pso_cache.set(d3d.device, d3d.cmd_list, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt);
+
+	DXGI_FORMAT dxgi_index_type;
+	u32 offset_shift = 0;
+	switch (index_type) {
+		case DataType::U32:
+			dxgi_index_type = DXGI_FORMAT_R32_UINT;
+			offset_shift = 2;
+			break;
+		case DataType::U16:
+			dxgi_index_type = DXGI_FORMAT_R16_UINT;
+			offset_shift = 1;
+			break;
+	}
+
+	ASSERT(d3d.current_index_buffer);
+	ID3D12Resource* b = d3d.current_index_buffer->resource;
+	D3D12_INDEX_BUFFER_VIEW ibv = {};
+	ibv.BufferLocation = b->GetGPUVirtualAddress() + offset;
+	ibv.Format = dxgi_index_type;
+	ibv.SizeInBytes = indices_count * (1 << offset_shift);
+	d3d.cmd_list->IASetIndexBuffer(&ibv);
+	d3d.cmd_list->IASetPrimitiveTopology(pt);
+
+	if (d3d.dirty_samplers) {
+		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+		d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d.dirty_samplers = false;
+	}
+	
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
+	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+
+	d3d.cmd_list->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
+}
+
+void drawTriangles(u32 offset_bytes, u32 indices_count, DataType index_type) {
+	drawTrianglesInstancedInternal(offset_bytes, indices_count, 1, index_type);
 }
 
 void drawArrays(u32 offset, u32 count, PrimitiveType type) {
@@ -2491,43 +2530,7 @@ void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
 }
 
 void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
-	ASSERT(d3d.current_program);
-	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d3d.pso_cache.set(d3d.device, d3d.cmd_list, d3d.current_state, d3d.current_program, d3d.current_framebuffer, d3d.root_signature, ptt);
-
-	DXGI_FORMAT dxgi_index_type;
-	u32 offset_shift = 0;
-	switch (index_type) {
-		case DataType::U32:
-			dxgi_index_type = DXGI_FORMAT_R32_UINT;
-			offset_shift = 2;
-			break;
-		case DataType::U16:
-			dxgi_index_type = DXGI_FORMAT_R16_UINT;
-			offset_shift = 1;
-			break;
-	}
-
-	ASSERT(d3d.current_index_buffer);
-	ID3D12Resource* b = d3d.current_index_buffer->resource;
-	D3D12_INDEX_BUFFER_VIEW ibv = {};
-	ibv.BufferLocation = b->GetGPUVirtualAddress();
-	ibv.Format = dxgi_index_type;
-	ibv.SizeInBytes = indices_count * (1 << offset_shift);
-	d3d.cmd_list->IASetIndexBuffer(&ibv);
-	d3d.cmd_list->IASetPrimitiveTopology(pt);
-
-	if (d3d.dirty_samplers) {
-		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d.sampler_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-		d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
-		d3d.dirty_samplers = false;
-	}
-	
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d.current_program, d3d.srv_heap, d3d.current_srvs, lengthOf(d3d.current_srvs));
-	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
-
-	d3d.cmd_list->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
+	drawTrianglesInstancedInternal(0, indices_count, instances_count, index_type);
 }
 
 void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, DataType index_type) {
@@ -2572,9 +2575,9 @@ void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, Dat
 	ASSERT(d3d.current_index_buffer);
 	ID3D12Resource* b = d3d.current_index_buffer->resource;
 	D3D12_INDEX_BUFFER_VIEW ibv = {};
-	ibv.BufferLocation = b->GetGPUVirtualAddress();
+	ibv.BufferLocation = b->GetGPUVirtualAddress() + offset_bytes;
 	ibv.Format = dxgi_index_type;
-	ibv.SizeInBytes = count * (1 << offset_shift) + offset_bytes;
+	ibv.SizeInBytes = count * (1 << offset_shift);
 	d3d.cmd_list->IASetIndexBuffer(&ibv);
 	d3d.cmd_list->IASetPrimitiveTopology(pt);
 
@@ -2584,7 +2587,7 @@ void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, Dat
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
 	d3d.cmd_list->SetGraphicsRootDescriptorTable(6, srv);
 
-	d3d.cmd_list->DrawIndexedInstanced(count, 1, offset_bytes >> offset_shift, 0, 0);
+	d3d.cmd_list->DrawIndexedInstanced(count, 1, 0, 0, 0);
 }
 
 void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size) {
