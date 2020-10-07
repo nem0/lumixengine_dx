@@ -1253,7 +1253,7 @@ void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 			uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
 			uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
 			uav_desc.Buffer.FirstElement = 0;
-			uav_desc.Buffer.NumElements = UINT(size / 16);
+			uav_desc.Buffer.NumElements = UINT(size / sizeof(float));
 			uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
 			d3d.device->CreateUnorderedAccessView(buffer->buffer, &uav_desc, &buffer->uav);
 		}
