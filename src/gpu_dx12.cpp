@@ -929,7 +929,10 @@ LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAlloc
 LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSRV(const Program& program, HeapAllocator& heap, const SRV* srvs, u32 count) {
 	D3D12_GPU_DESCRIPTOR_HANDLE res = heap.getGPU();
 	for (u32 i = 0; i < count; ++i) {
-		if ((program.used_srvs_flags & (1 << i)) == 0) continue;
+		if ((program.used_srvs_flags & (1 << i)) == 0) {
+			++heap.count;
+			continue;
+		}
 
 		const bool is_readonly = program.readonly_binding_flags & (1 << i);
 		if (srvs[i].buffer) {
