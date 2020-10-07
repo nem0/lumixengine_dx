@@ -20,7 +20,7 @@ if _OPTIONS["nodx"] == nil then
 		excludes { "../../src/renderer/gpu/gpu.cpp" }
 
 		if _OPTIONS["dx12"] then
-			includedirs {"external/pix/Include/WinPixEventRuntime", "../../plugins/dx11/external/include/dx" }
+			includedirs {"external/pix/Include/WinPixEventRuntime", "external/include/dx" }
 			files { "external/pix/bin/x64/WinPixEventRuntime.dll" }
 			copy { "external/pix/bin/x64/WinPixEventRuntime.dll" }
 			excludes { "src/gpu_dx.cpp" }
