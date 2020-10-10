@@ -1509,6 +1509,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	const bool is_3d = flags & (u32)TextureFlags::IS_3D;
 	const bool is_cubemap = flags & (u32)TextureFlags::IS_CUBE;
 	const bool compute_write = flags & (u32)TextureFlags::COMPUTE_WRITE;
+	const bool is_render_target = flags & (u32)TextureFlags::RENDER_TARGET;
 
 	switch (format) {
 		case TextureFormat::R8:
@@ -1542,6 +1543,8 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	D3D11_TEXTURE3D_DESC desc_3d = {};
 	D3D11_TEXTURE2D_DESC desc_2d = {};
 	
+	const bool is_depth_format = isDepthFormat(getDXGIFormat(format));
+	const bool gen_mip = !readback && !no_mips && !is_depth_format;
 	auto fill_desc = [&](auto& desc){
 		desc.Width = w;
 		desc.Height = h;
@@ -1549,12 +1552,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.CPUAccessFlags = 0;
 		desc.Format = getDXGIFormat(format);
-		const bool is_depth_format = isDepthFormat(desc.Format);
-		if (is_depth_format) {
-			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL;
-		}
-		else {
-			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		if (is_render_target || gen_mip) {
+			desc.BindFlags |= is_depth_format ? D3D11_BIND_DEPTH_STENCIL : D3D11_BIND_RENDER_TARGET;
 		}
 		if (compute_write) {
 			desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
@@ -1564,7 +1564,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 			desc.BindFlags = 0;
 		}
-		desc.MiscFlags = readback || no_mips || is_depth_format ? 0 : D3D11_RESOURCE_MISC_GENERATE_MIPS;
+		desc.MiscFlags = gen_mip ? D3D11_RESOURCE_MISC_GENERATE_MIPS : 0;
 		texture.dxgi_format = desc.Format;
 	};
 
@@ -1582,83 +1582,24 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		bytes_per_pixel = getSize(desc_2d.Format);
 	}
 
-	Array<Array<u8>> mips_data(d3d->allocator);
-	mips_data.reserve(mip_count - 1);
-	if(data) {
-		D3D11_SUBRESOURCE_DATA* srd = (D3D11_SUBRESOURCE_DATA*)_alloca(sizeof(D3D11_SUBRESOURCE_DATA) * mip_count * (is_cubemap ? 6 : depth));
-		const u8* ptr = (u8*)data;
-		
-		// TODO some formats are transformed to different sized dxgi formats
-		u32 idx = 0;
-		for(u32 layer = 0; layer < (is_cubemap ? 6 : depth); ++layer) {
-			srd[idx].pSysMem = ptr;
-			srd[idx].SysMemPitch = w * bytes_per_pixel;
-			srd[idx].SysMemSlicePitch = h * srd[idx].SysMemPitch;
-			++idx;
-			u32 prev_mip_w = w;
-			u32 prev_mip_h = h;
-			const u8* prev_mip_data = ptr;
-			ptr += w * h * bytes_per_pixel;
-			for (u32 mip = 1; mip < mip_count; ++mip) {
-				Array<u8>& mip_data = mips_data.emplace(d3d->allocator);
-				const u32 mip_w = maximum(w >> mip, 1);
-				const u32 mip_h = maximum(h >> mip, 1);
-				mip_data.resize(bytes_per_pixel * mip_w * mip_h);
-				switch(format) {
-					case TextureFormat::R8:
-						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 1);
-						break;
-					case TextureFormat::SRGBA:
-					case TextureFormat::RGBA8:
-						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 4);
-						break;
-					case TextureFormat::SRGB:
-						stbir_resize_uint8(prev_mip_data, prev_mip_w, prev_mip_h, 0, mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 3);
-						break;
-					case TextureFormat::R32F:
-						stbir_resize_float((const float*)prev_mip_data, prev_mip_w, prev_mip_h, 0, (float*)mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 1);
-						break;
-					case TextureFormat::RGBA32F:
-						stbir_resize_float((const float*)prev_mip_data, prev_mip_w, prev_mip_h, 0, (float*)mip_data.begin(), maximum(1, prev_mip_w >> 1), maximum(1, prev_mip_h >> 1), 0, 4);
-						break;
-					default: ASSERT(false); return false;
-				}
-				prev_mip_w = mip_w;
-				prev_mip_h = mip_h;
-				prev_mip_data = mip_data.begin();
-				srd[idx].pSysMem = mip_data.begin();
-				srd[idx].SysMemPitch = mip_w * bytes_per_pixel;
-				srd[idx].SysMemSlicePitch = mip_h * srd[idx].SysMemPitch;
-				++idx;
-			}
-		}
-
-		if (is_3d) {
-			d3d->device->CreateTexture3D(&desc_3d, srd, &texture.texture3D);
-		}
-		else {
-			d3d->device->CreateTexture2D(&desc_2d, srd, &texture.texture2D);
-		}
-	}
-	else {
-		if (is_3d) {
-			d3d->device->CreateTexture3D(&desc_3d, nullptr, &texture.texture3D);
-		}
-		else {
-			d3d->device->CreateTexture2D(&desc_2d, nullptr, &texture.texture2D);
-		}
-	}
-
 	if (is_3d) {
+		d3d->device->CreateTexture3D(&desc_3d, nullptr, &texture.texture3D);
 		ASSERT(texture.texture3D);
 		if(debug_name && debug_name[0]) {
 			texture.texture3D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
 		}
+		if (data) {
+			d3d->device_ctx->UpdateSubresource(texture.texture3D, 0, nullptr, data, w * bytes_per_pixel, w  * h * bytes_per_pixel);
+		}
 	}
 	else {
+		d3d->device->CreateTexture2D(&desc_2d, nullptr, &texture.texture2D);
 		ASSERT(texture.texture2D);
 		if(debug_name && debug_name[0]) {
 			texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
+		}
+		if (data) {
+			d3d->device_ctx->UpdateSubresource(texture.texture2D, 0, nullptr, data, w * bytes_per_pixel, w  * h * bytes_per_pixel);
 		}
 	}
 
@@ -1700,7 +1641,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			srv_desc.Texture2D.MipLevels = mip_count;
 			d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 		}
-
+		if (data && gen_mip) {
+			d3d->device_ctx->GenerateMips(texture.srv);
+		}
 	}
 	return true;
 }
