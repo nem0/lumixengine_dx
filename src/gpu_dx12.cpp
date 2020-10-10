@@ -1650,8 +1650,7 @@ void clear(u32 flags, const float* color, float depth) {
 void* map(BufferHandle buffer, size_t size) {
 	ASSERT(buffer);
 	ASSERT(!buffer->mapped_ptr);
-	D3D12_RANGE range = {};
-	HRESULT hr = buffer->resource->Map(0, &range, (void**)&buffer->mapped_ptr);
+	HRESULT hr = buffer->resource->Map(0, nullptr, (void**)&buffer->mapped_ptr);
 	ASSERT(hr == S_OK);
 	ASSERT(buffer->mapped_ptr);
 	return buffer->mapped_ptr;

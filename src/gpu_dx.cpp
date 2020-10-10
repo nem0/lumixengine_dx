@@ -158,7 +158,7 @@ struct Buffer {
 	~Buffer() {
 		if (srv) srv->Release();
 		if (uav) uav->Release();
-		buffer->Release();
+		if (buffer) buffer->Release();
 	}
 
 	ID3D11Buffer* buffer = nullptr;
@@ -878,6 +878,7 @@ bool init(void* hwnd, u32 flags) {
 	d3d->shader_compiler.load(".shader_cache_dx11");
 
 	d3d->initialized = true;
+	logInfo("gpu") << "DX11 renderer initialized.";
 	return true;
 }
 
