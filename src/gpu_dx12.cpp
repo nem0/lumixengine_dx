@@ -740,6 +740,11 @@ struct Frame {
 		return true;
 	}
 
+	bool isFinished() {
+		DWORD res = ::WaitForSingleObject(fence_event, 0);
+		return res == WAIT_OBJECT_0;
+	}
+
 	void wait() {
 		if (!fence_event) return;
 
@@ -1698,6 +1703,11 @@ void setCurrentWindow(void* window_handle) {
 
 	logError("gpu") << "Too many windows created.";
 	ASSERT(false);
+}
+
+bool frameFinished(u32 frame_idx) {
+	Frame& f = d3d->frames.begin()[frame_idx];
+	return f.isFinished();
 }
 
 void waitFrame(u32 frame_idx) {
