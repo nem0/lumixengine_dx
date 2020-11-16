@@ -750,11 +750,11 @@ bool init(void* hwnd, u32 flags) {
 	d3d->d3d_dll = LoadLibrary("d3d11.dll");
 	d3d->dxgi_dll = LoadLibrary("dxgi.dll");
 	if (!d3d->d3d_dll) {
-		logError("gpu") << "Failed to load d3d11.dll";
+		logError("Failed to load d3d11.dll");
 		return false;
 	}
 	if (!d3d->dxgi_dll) {
-		logError("gpu") << "Failed to load dxgi.dll";
+		logError("Failed to load dxgi.dll");
 		return false;
 	}
 
@@ -863,7 +863,7 @@ bool init(void* hwnd, u32 flags) {
 		++try_num;
 	}
 	if(try_num == 1000) {
-		logError("gpu") << "Failed to get GPU query frequency. All timings are unreliable.";
+		logError("Failed to get GPU query frequency. All timings are unreliable.");
 		d3d->query_frequency = 1'000'000'000;
 	}
 	else {
@@ -878,7 +878,7 @@ bool init(void* hwnd, u32 flags) {
 	d3d->shader_compiler.load(".shader_cache_dx11");
 
 	d3d->initialized = true;
-	logInfo("gpu") << "DX11 renderer initialized.";
+	logInfo("DX11 renderer initialized.");
 	return true;
 }
 
@@ -1088,21 +1088,21 @@ void setCurrentWindow(void* window_handle)
 		HRESULT hr = factory->CreateSwapChain(d3d->device, &desc, &window.swapchain);
 
 		if(!SUCCEEDED(hr)) {
-			logError("gpu") << "Failed to create swapchain";
+			logError("Failed to create swapchain");
 			return;
 		}
 
 		ID3D11Texture2D* rt;
 		hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
 		if(!SUCCEEDED(hr)) {
-			logError("gpu") << "Failed to get swapchain's buffer";
+			logError("Failed to get swapchain's buffer");
 			return;
 		}
 
 		hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &window.framebuffer.render_targets[0]);
 		rt->Release();
 		if(!SUCCEEDED(hr)) {
-			logError("gpu") << "Failed to create RTV";
+			logError("Failed to create RTV");
 			return;
 		}
 
@@ -1113,7 +1113,7 @@ void setCurrentWindow(void* window_handle)
 		return;
 	}
 
-	logError("gpu") << "Too many windows created.";
+	logError("Too many windows created.");
 	ASSERT(false);
 }
 
@@ -1330,7 +1330,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	if (hdr.dwMagic != DDS::DDS_MAGIC || hdr.dwSize != 124 ||
 		!(hdr.dwFlags & DDS::DDSD_PIXELFORMAT) || !(hdr.dwFlags & DDS::DDSD_CAPS))
 	{
-		logError("renderer") << "Wrong dds format or corrupted dds (" << debug_name << ")";
+		logError("Wrong dds format or corrupted dds (", debug_name, ")");
 		return false;
 	}
 

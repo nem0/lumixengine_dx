@@ -167,7 +167,7 @@ struct ShaderCompiler {
 		auto res2 = shader.parse(&DefaultTBuiltInResource, 430, false, EShMsgDefault);
 		const char* log = shader.getInfoLog();
 		if (!res2) {
-			logError("Renderer") << shader_name << ": " << log;
+			logError(shader_name, ": ", log);
 		}
 		p.addShader(&shader);
 		auto res = p.link(EShMsgDefault);
@@ -190,9 +190,7 @@ struct ShaderCompiler {
 
 			const spirv_cross::VariableID num_workgroups_builtin_id = hlsl.remap_num_workgroups_builtin();
 			if (num_workgroups_builtin_id != spirv_cross::VariableID(0)) {
-				logError("Renderer") << shader_name
-									 << ": there's no hlsl equivalent to gl_NumWorkGroups, use "
-										"user-provided uniforms instead.";
+				logError(shader_name, ": there's no hlsl equivalent to gl_NumWorkGroups, use user-provided uniforms instead.");
 				return false;
 			}
 			out = hlsl.compile();
@@ -259,9 +257,9 @@ struct ShaderCompiler {
 			&errors);
 		if (errors) {
 			if (SUCCEEDED(hr)) {
-				logInfo("gpu") << (LPCSTR)errors->GetBufferPointer();
+				logInfo("gpu: ", (LPCSTR)errors->GetBufferPointer());
 			} else {
-				logError("gpu") << (LPCSTR)errors->GetBufferPointer();
+				logError("gpu: ", (LPCSTR)errors->GetBufferPointer());
 			}
 			errors->Release();
 			if (FAILED(hr)) return nullptr;
@@ -279,16 +277,19 @@ struct ShaderCompiler {
 		OS::OutputFile file;
 		if (file.open(filename)) {
 			u32 version = 0;
-			file.write(&version, sizeof(version));
+			bool success = file.write(&version, sizeof(version));
 			for (auto iter = m_cache.begin(), end = m_cache.end(); iter != end; ++iter) {
 				const u32 hash = iter.key();
 				const CachedShader& s = iter.value();
 				const u32 size = (u32)s.data.size();
-				file.write(&hash, sizeof(hash));
-				file.write(&size, sizeof(size));
-				file.write(s.data.data(), size);
-				file.write(&s.readonly_bitset, sizeof(s.readonly_bitset));
-				file.write(&s.used_srvs_bitset, sizeof(s.used_srvs_bitset));
+				success = success || file.write(&hash, sizeof(hash));
+				success = success || file.write(&size, sizeof(size));
+				success = success || file.write(s.data.data(), size);
+				success = success || file.write(&s.readonly_bitset, sizeof(s.readonly_bitset));
+				success = success || file.write(&s.used_srvs_bitset, sizeof(s.used_srvs_bitset));
+			}
+			if (!success) {
+				logError("Could not write ", filename);
 			}
 			file.close();
 		}
@@ -298,7 +299,9 @@ struct ShaderCompiler {
 		OS::InputFile file;
 		if (file.open(filename)) {
 			u32 version;
-			file.read(&version, sizeof(version));
+			if (!file.read(&version, sizeof(version))) {
+				logError("Could not read ", filename);
+			}
 			ASSERT(version == 0);
 			u32 hash;
 			while (file.read(&hash, sizeof(hash))) {
