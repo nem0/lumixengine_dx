@@ -1429,11 +1429,11 @@ bool init(void* hwnd, u32 flags) {
 	d3d->d3d_dll = LoadLibrary("d3d12.dll");
 	d3d->dxgi_dll = LoadLibrary("dxgi.dll");
 	if (!d3d->d3d_dll) {
-		logError("gpu") << "Failed to load d3d11.dll";
+		logError("Failed to load d3d11.dll");
 		return false;
 	}
 	if (!d3d->dxgi_dll) {
-		logError("gpu") << "Failed to load dxgi.dll";
+		logError("Failed to load dxgi.dll");
 		return false;
 	}
 
@@ -1532,7 +1532,7 @@ bool init(void* hwnd, u32 flags) {
 	if (!d3d->device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d->query_heap)) == S_OK) return false;
 	HRESULT freq_hr = d3d->cmd_queue->GetTimestampFrequency(&d3d->query_frequency);
 	if (FAILED(freq_hr)) {
-		logError("gpu") << "failed to get timestamp frequency, GPU timing will most likely be wrong";
+		logError("failed to get timestamp frequency, GPU timing will most likely be wrong");
 		d3d->query_frequency = 1'000'000'000;
 	}
 
@@ -1701,7 +1701,7 @@ void setCurrentWindow(void* window_handle) {
 		return;
 	}
 
-	logError("gpu") << "Too many windows created.";
+	logError("Too many windows created.");
 	ASSERT(false);
 }
 
@@ -1897,7 +1897,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	blob.read(&hdr, sizeof(hdr));
 
 	if (hdr.dwMagic != DDS::DDS_MAGIC || hdr.dwSize != 124 || !(hdr.dwFlags & DDS::DDSD_PIXELFORMAT) || !(hdr.dwFlags & DDS::DDSD_CAPS)) {
-		logError("renderer") << "Wrong dds format or corrupted dds (" << debug_name << ")";
+		logError("Wrong dds format or corrupted dds (", debug_name, ")");
 		return false;
 	}
 
