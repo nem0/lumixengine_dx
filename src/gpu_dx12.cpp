@@ -239,7 +239,7 @@ struct Texture {
 	D3D12_RESOURCE_STATES state;
 	u32 heap_id;
 	DXGI_FORMAT dxgi_format;
-	u16 flags;
+	TextureFlags flags;
 	#ifdef LUMIX_DEBUG
 		StaticString<64> name;
 	#endif
@@ -281,7 +281,7 @@ struct PSOCache {
 
 	void set(ID3D12Device* device
 		, ID3D12GraphicsCommandList* cmd_list
-		, u64 state
+		, StateFlags state
 		, ProgramHandle program
 		, const FrameBuffer& fb
 		, ID3D12RootSignature* root_signature
@@ -293,7 +293,7 @@ struct PSOCache {
 	}
 
 	ID3D12PipelineState* getPipelineState(ID3D12Device* device
-		, u64 state
+		, StateFlags state
 		, ProgramHandle program
 		, const FrameBuffer& fb
 		, ID3D12RootSignature* root_signature
@@ -323,9 +323,9 @@ struct PSOCache {
 
 		desc.PrimitiveTopologyType = pt;
 
-		if (state & u64(StateFlags::CULL_BACK)) {
+		if (u64(state & StateFlags::CULL_BACK)) {
 			desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-		} else if (state & u64(StateFlags::CULL_FRONT)) {
+		} else if (u64(state & StateFlags::CULL_FRONT)) {
 			desc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
 		} else {
 			desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -333,19 +333,19 @@ struct PSOCache {
 
 		desc.pRootSignature = root_signature;
 		desc.RasterizerState.FrontCounterClockwise = TRUE;
-		desc.RasterizerState.FillMode = (state & u64(StateFlags::WIREFRAME)) != 0 ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
+		desc.RasterizerState.FillMode = u64(state & StateFlags::WIREFRAME) ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
 		// TODO enable/disable scissor
 		desc.RasterizerState.DepthClipEnable = FALSE;
 
-		desc.DepthStencilState.DepthEnable = (state & u64(StateFlags::DEPTH_TEST)) != 0;
-		desc.DepthStencilState.DepthWriteMask = (state & u64(StateFlags::DEPTH_WRITE)) != 0 && desc.DepthStencilState.DepthEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-		desc.DepthStencilState.DepthFunc = (state & u64(StateFlags::DEPTH_TEST)) != 0 ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_ALWAYS;
+		desc.DepthStencilState.DepthEnable = u64(state & StateFlags::DEPTH_TEST) != 0;
+		desc.DepthStencilState.DepthWriteMask = u64(state & StateFlags::DEPTH_WRITE) && desc.DepthStencilState.DepthEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+		desc.DepthStencilState.DepthFunc = u64(state & StateFlags::DEPTH_TEST) ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_ALWAYS;
 
-		const StencilFuncs func = (StencilFuncs)((state >> 30) & 0xf);
+		const StencilFuncs func = (StencilFuncs)((u64(state) >> 30) & 0xf);
 		desc.DepthStencilState.StencilEnable = func != StencilFuncs::DISABLE;
 		if (desc.DepthStencilState.StencilEnable) {
-			desc.DepthStencilState.StencilReadMask = u8(state >> 42);
-			desc.DepthStencilState.StencilWriteMask = u8(state >> 22);
+			desc.DepthStencilState.StencilReadMask = u8(u64(state) >> 42);
+			desc.DepthStencilState.StencilWriteMask = u8(u64(state) >> 22);
 			D3D12_COMPARISON_FUNC dx_func;
 			switch (func) {
 				case StencilFuncs::ALWAYS: dx_func = D3D12_COMPARISON_FUNC_ALWAYS; break;
@@ -364,9 +364,9 @@ struct PSOCache {
 					D3D12_STENCIL_OP_DECR};
 				return table[(int)op];
 			};
-			const D3D12_STENCIL_OP sfail = toDXOp(StencilOps((state >> 50) & 0xf));
-			const D3D12_STENCIL_OP zfail = toDXOp(StencilOps((state >> 54) & 0xf));
-			const D3D12_STENCIL_OP zpass = toDXOp(StencilOps((state >> 58) & 0xf));
+			const D3D12_STENCIL_OP sfail = toDXOp(StencilOps((u64(state) >> 50) & 0xf));
+			const D3D12_STENCIL_OP zfail = toDXOp(StencilOps((u64(state) >> 54) & 0xf));
+			const D3D12_STENCIL_OP zpass = toDXOp(StencilOps((u64(state) >> 58) & 0xf));
 
 			desc.DepthStencilState.FrontFace.StencilFailOp = sfail;
 			desc.DepthStencilState.FrontFace.StencilDepthFailOp = zfail;
@@ -379,7 +379,7 @@ struct PSOCache {
 			desc.DepthStencilState.BackFace.StencilFunc = dx_func;
 		}
 
-		const u16 blend_bits = u16(state >> 6);
+		const u16 blend_bits = u16(u64(state) >> 6);
 
 		auto to_dx = [&](BlendFactors factor) -> D3D12_BLEND {
 			static const D3D12_BLEND table[] = {
@@ -827,9 +827,9 @@ struct D3D {
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	ProgramHandle current_program = INVALID_PROGRAM;
 	SRV current_srvs[10];
-	u32 current_sampler_flags[10] = {};
+	TextureFlags current_sampler_flags[10] = {};
 	bool dirty_samplers = true;
-	u64 current_state = 0;
+	StateFlags current_state = StateFlags::NONE;
 	PSOCache pso_cache;
 	Window windows[64];
 	Window* current_window = windows;
@@ -884,7 +884,7 @@ LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAlloc
 	for (u32 i = 0; i < count; ++i) {
 		if (srvs[i].texture) {
 			ASSERT(srvs[i].texture);
-			flags[i] = srvs[i].texture->flags;
+			flags[i] = (u16)srvs[i].texture->flags;
 		} else {
 			flags[i] = 0;
 		}
@@ -912,11 +912,11 @@ LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAlloc
 			D3D12_SAMPLER_DESC desc = {};
 			ASSERT(srvs[i].texture);
 			const Texture& t = *srvs[i].texture;
-			desc.AddressU = (t.flags & (u32)TextureFlags::CLAMP_U) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-			desc.AddressV = (t.flags & (u32)TextureFlags::CLAMP_V) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-			desc.AddressW = (t.flags & (u32)TextureFlags::CLAMP_W) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			desc.AddressU = u32(t.flags & TextureFlags::CLAMP_U) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			desc.AddressV = u32(t.flags & TextureFlags::CLAMP_V) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			desc.AddressW = u32(t.flags & TextureFlags::CLAMP_W) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			desc.MipLODBias = 0;
-			desc.Filter = t.flags & (u32)TextureFlags::POINT_FILTER ? D3D12_FILTER_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+			desc.Filter = u32(t.flags & TextureFlags::POINT_FILTER) ? D3D12_FILTER_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 			desc.MaxLOD = 1000;
 			desc.MinLOD = -1000;
 			desc.MaxAnisotropy = 1;
@@ -1408,8 +1408,8 @@ static bool createSwapchain(HWND hwnd, Ref<D3D::Window> window) {
 	return true;
 }
 
-bool init(void* hwnd, u32 flags) {
-	bool debug = flags & (u32)InitFlags::DEBUG_OUTPUT;
+bool init(void* hwnd, InitFlags flags) {
+	bool debug = u32(flags & InitFlags::DEBUG_OUTPUT);
 #ifdef LUMIX_DEBUG
 	debug = true;
 #endif
@@ -1592,7 +1592,7 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip) {
 	ASSERT(false); // TODO
 }
 
-void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle depth_stencil, u32 flags) {
+void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle depth_stencil, FramebufferFlags flags) {
 	checkThread();
 	d3d->pso_cache.last = nullptr;
 
@@ -1600,7 +1600,7 @@ void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle depth_ste
 		if (texture) texture->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
 	}
 
-	const bool readonly_ds = flags & (u32)FramebufferFlags::READONLY_DEPTH_STENCIL;
+	const bool readonly_ds = u32(flags & FramebufferFlags::READONLY_DEPTH_STENCIL);
 	if (!attachments && !depth_stencil) {
 		d3d->current_framebuffer.count = 1;
 		d3d->current_framebuffer.formats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -1633,18 +1633,18 @@ void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle depth_ste
 	d3d->cmd_list->OMSetRenderTargets(d3d->current_framebuffer.count, d3d->current_framebuffer.render_targets, FALSE, ds);
 }
 
-void clear(u32 flags, const float* color, float depth) {
-	if (flags & (u32)ClearFlags::COLOR) {
+void clear(ClearFlags flags, const float* color, float depth) {
+	if (u32(flags & ClearFlags::COLOR)) {
 		for (u32 i = 0; i < d3d->current_framebuffer.count; ++i) {
 			d3d->cmd_list->ClearRenderTargetView(d3d->current_framebuffer.render_targets[i], color, 0, nullptr);
 		}
 	}
 
 	D3D12_CLEAR_FLAGS dx_flags = {};
-	if (flags & (u32)ClearFlags::DEPTH) {
+	if (u32(flags & ClearFlags::DEPTH)) {
 		dx_flags |= D3D12_CLEAR_FLAG_DEPTH;
 	}
-	if (flags & (u32)ClearFlags::STENCIL) {
+	if (u32(flags & ClearFlags::STENCIL)) {
 		dx_flags |= D3D12_CLEAR_FLAG_STENCIL;
 	}
 	if (dx_flags && d3d->current_framebuffer.depth_stencil.ptr) {
@@ -1791,13 +1791,13 @@ u32 swapBuffers() {
 	return res;
 }
 
-void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data) {
+void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const void* data) {
 	ASSERT(buffer);
 	ASSERT(!buffer->resource);
 	ASSERT(size < UINT_MAX);
 	buffer->size = (u32)size;
-	const bool mappable = flags & (u32)BufferFlags::MAPPABLE;
-	const bool shader_buffer = flags & (u32)BufferFlags::SHADER_BUFFER;
+	const bool mappable = u32(flags & BufferFlags::MAPPABLE);
+	const bool shader_buffer = u32(flags & BufferFlags::SHADER_BUFFER);
 	if (shader_buffer) {
 		size = ((size + 15) / 16) * 16;
 	}	
@@ -1887,7 +1887,7 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 	++attributes_count;
 }
 
-bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, const char* debug_name) {
+bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags flags, const char* debug_name) {
 	checkThread();
 	ASSERT(debug_name && debug_name[0]);
 	ASSERT(handle);
@@ -1935,7 +1935,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	}
 
 	const bool is_cubemap = (hdr.caps2.dwCaps2 & DDS::DDSCAPS2_CUBEMAP) != 0;
-	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
+	const bool is_srgb = u32(flags & TextureFlags::SRGB);
 	const DXGI_FORMAT internal_format = is_srgb ? li->srgb_format : li->format;
 	const u32 mip_count = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
 	Texture& texture = *handle;
@@ -2048,16 +2048,16 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	return true;
 }
 
-bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, u32 flags, const void* data, const char* debug_name) {
+bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const void* data, const char* debug_name) {
 	ASSERT(handle);
 
-	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
-	const bool no_mips = flags & (u32)TextureFlags::NO_MIPS;
-	const bool readback = flags & (u32)TextureFlags::READBACK;
-	const bool is_3d = flags & (u32)TextureFlags::IS_3D;
-	const bool is_cubemap = flags & (u32)TextureFlags::IS_CUBE;
-	const bool compute_write = flags & (u32)TextureFlags::COMPUTE_WRITE;
-	const bool render_target = flags & (u32)TextureFlags::RENDER_TARGET;
+	const bool is_srgb = u32(flags & TextureFlags::SRGB);
+	const bool no_mips = u32(flags & TextureFlags::NO_MIPS);
+	const bool readback = u32(flags & TextureFlags::READBACK);
+	const bool is_3d = u32(flags & TextureFlags::IS_3D);
+	const bool is_cubemap = u32(flags & TextureFlags::IS_CUBE);
+	const bool compute_write = u32(flags & TextureFlags::COMPUTE_WRITE);
+	const bool render_target = u32(flags & TextureFlags::RENDER_TARGET);
 
 	switch (format) {
 		case TextureFormat::R8:
@@ -2218,10 +2218,10 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	return true;
 }
 
-void setState(u64 state) {
+void setState(StateFlags state) {
 	if (state != d3d->current_state) {
 		d3d->pso_cache.last = nullptr;
-		const u8 stencil_ref = u8(state >> 34);
+		const u8 stencil_ref = u8(u64(state) >> 34);
 		d3d->cmd_list->OMSetStencilRef(stencil_ref);
 	}
 	d3d->current_state = state;
@@ -2377,7 +2377,7 @@ void destroy(BufferHandle buffer) {
 	LUMIX_DELETE(d3d->allocator, buffer);
 }
 
-void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags) {
+void bindShaderBuffer(BufferHandle buffer, u32 binding_point, BindShaderBufferFlags flags) {
 	ASSERT(binding_point < 10);
 	d3d->current_srvs[binding_point].texture = INVALID_TEXTURE;
 	d3d->current_srvs[binding_point].buffer = buffer;

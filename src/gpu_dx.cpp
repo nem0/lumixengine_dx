@@ -190,7 +190,7 @@ struct Texture {
 	ID3D11SamplerState* sampler = nullptr;
 	u32 rtv_face = 0;
 	u32 rtv_mip = 0;
-	u32 flags;
+	TextureFlags flags;
 	u32 w;
 	u32 h;
 	DXGI_FORMAT dxgi_format;
@@ -575,7 +575,7 @@ void update(TextureHandle texture, u32 mip, u32 face, u32 x, u32 y, u32 w, u32 h
 	ASSERT(texture);
 	ASSERT(texture->dxgi_format == getDXGIFormat(format));
 
-	const bool no_mips = texture->flags & (u32)TextureFlags::NO_MIPS;
+	const bool no_mips = u32(texture->flags & TextureFlags::NO_MIPS);
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture->w, texture->h));
 	const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
 	const u32 bytes_per_pixel = getSize(texture->dxgi_format);
@@ -596,7 +596,7 @@ void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
 	ASSERT(dst);
 	ASSERT(src);
 
-	const bool no_mips = src->flags & (u32)TextureFlags::NO_MIPS;
+	const bool no_mips = u32(src->flags & TextureFlags::NO_MIPS);
 	const u32 src_mip_count = no_mips ? 1 : 1 + log2(maximum(src->w, src->h));
 	const u32 dst_mip_count = no_mips ? 1 : 1 + log2(maximum(dst->w, dst->h));
 
@@ -605,7 +605,7 @@ void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
 		const u32 w = maximum(src->w >> mip, 1);
 		const u32 h = maximum(src->h >> mip, 1);
 
-		if (src->flags & (u32)TextureFlags::IS_CUBE) {
+		if (u32(src->flags & TextureFlags::IS_CUBE)) {
 			for (u32 face = 0; face < 6; ++face) {
 				const UINT src_subres = D3D11CalcSubresource(mip, face, src_mip_count);
 				const UINT dst_subres = D3D11CalcSubresource(mip, face, dst_mip_count);
@@ -618,8 +618,8 @@ void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
 			d3d->device_ctx->CopySubresourceRegion(dst->texture2D, dst_subres, dst_x, dst_y, 0, src->texture2D, src_subres, nullptr);
 		}
 		++mip;
-		if (src->flags & (u32)TextureFlags::NO_MIPS) break;
-		if (dst->flags & (u32)TextureFlags::NO_MIPS) break;
+		if (u32(src->flags & TextureFlags::NO_MIPS)) break;
+		if (u32(dst->flags & TextureFlags::NO_MIPS)) break;
 	}
 }
 
@@ -627,8 +627,8 @@ void readTexture(TextureHandle texture, u32 mip, Span<u8> buf) {
 	ASSERT(texture);
 	D3D11_MAPPED_SUBRESOURCE data;
 	
-	const u32 faces = (texture->flags & (u32)TextureFlags::IS_CUBE) ? 6 : 1;
-	const bool no_mips = texture->flags & (u32)TextureFlags::NO_MIPS;
+	const u32 faces = u32(texture->flags & TextureFlags::IS_CUBE) ? 6 : 1;
+	const bool no_mips = u32(texture->flags & TextureFlags::NO_MIPS);
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture->w, texture->h));
 	u8* ptr = buf.begin();
 	
@@ -723,14 +723,14 @@ void shutdown() {
 	d3d.destroy();
 }
 
-bool init(void* hwnd, u32 flags) {
+bool init(void* hwnd, InitFlags flags) {
 	if (d3d->initialized) {
 		// we don't support reinitialization
 		ASSERT(false);
 		return false;
 	}
 
-	bool debug = flags & (u32)InitFlags::DEBUG_OUTPUT;
+	bool debug = u32(flags & InitFlags::DEBUG_OUTPUT);
 	#ifdef LUMIX_DEBUG
 		debug = true;
 	#endif
@@ -935,11 +935,11 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
 }
 
 // TODO texture might get destroyed while framebuffer has rtv or dsv to it
-void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, u32 flags) {
+void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, FramebufferFlags flags) {
 	ASSERT(num < (u32)lengthOf(d3d->current_framebuffer.render_targets));
 	checkThread();
 
-	const bool readonly_ds = flags & (u32)FramebufferFlags::READONLY_DEPTH_STENCIL;
+	const bool readonly_ds = u32(flags & FramebufferFlags::READONLY_DEPTH_STENCIL);
 	if (!attachments && !ds) {
 		d3d->current_framebuffer = d3d->current_window->framebuffer;
 		d3d->device_ctx->OMSetRenderTargets(d3d->current_framebuffer.count, d3d->current_framebuffer.render_targets, d3d->current_framebuffer.depth_stencil);
@@ -995,18 +995,18 @@ void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, u32 f
 	d3d->device_ctx->OMSetRenderTargets(d3d->current_framebuffer.count, d3d->current_framebuffer.render_targets, d3d->current_framebuffer.depth_stencil);
 }
 
-void clear(u32 flags, const float* color, float depth)
+void clear(ClearFlags flags, const float* color, float depth)
 {
-	if (flags & (u32)ClearFlags::COLOR) {
+	if (u32(flags & ClearFlags::COLOR)) {
 		for (u32 i = 0; i < d3d->current_framebuffer.count; ++i) {
 			d3d->device_ctx->ClearRenderTargetView(d3d->current_framebuffer.render_targets[i], color);
 		}
 	}
 	u32 ds_flags = 0;
-	if (flags & (u32)ClearFlags::DEPTH) {
+	if (u32(flags & ClearFlags::DEPTH)) {
 		ds_flags |= D3D11_CLEAR_DEPTH;
 	}
-	if (flags & (u32)ClearFlags::STENCIL) {
+	if (u32(flags & ClearFlags::STENCIL)) {
 		ds_flags |= D3D11_CLEAR_STENCIL;
 	}
 	if (ds_flags && d3d->current_framebuffer.depth_stencil) {
@@ -1202,36 +1202,36 @@ u32 swapBuffers()
 void waitFrame(u32 frame) {}
 bool frameFinished(u32 frame) { return true; }
 
-void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
+void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const void* data)
 {
 	ASSERT(buffer);
 	ASSERT(!buffer->buffer);
 	D3D11_BUFFER_DESC desc = {};
-	if(flags & (u32)BufferFlags::SHADER_BUFFER) {
+	if(u32(flags & BufferFlags::SHADER_BUFFER)) {
 		size = ((size + 15) / 16) * 16;
 	}
 
 	desc.ByteWidth = (UINT)size;
-	buffer->is_constant_buffer = flags & (u32)BufferFlags::UNIFORM_BUFFER;
-	if (flags & (u32)BufferFlags::UNIFORM_BUFFER) {
+	buffer->is_constant_buffer = u32(flags & BufferFlags::UNIFORM_BUFFER);
+	if (u32(flags & BufferFlags::UNIFORM_BUFFER)) {
 		desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; 
 	}
 	else {
 		desc.BindFlags = D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER; 
-		if (flags & (u32)BufferFlags::SHADER_BUFFER) {
+		if (u32(flags & BufferFlags::SHADER_BUFFER)) {
 			desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
 			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-			if (flags & (u32)BufferFlags::COMPUTE_WRITE) {
+			if (u32(flags & BufferFlags::COMPUTE_WRITE)) {
 				desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
 				desc.MiscFlags |= D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
 			}
 		}
 	}
 
-	if (flags & (u32)BufferFlags::IMMUTABLE) {
+	if (u32(flags & BufferFlags::IMMUTABLE)) {
 		desc.Usage = D3D11_USAGE_IMMUTABLE;
 	}
-	else if (flags & (u32)BufferFlags::COMPUTE_WRITE) {
+	else if (u32(flags & BufferFlags::COMPUTE_WRITE)) {
 		desc.Usage = D3D11_USAGE_DEFAULT;
 	}
 	else {
@@ -1242,7 +1242,7 @@ void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 	initial_data.pSysMem = data;
 	d3d->device->CreateBuffer(&desc, data ? &initial_data : nullptr, &buffer->buffer);
 
-	if(flags & (u32)BufferFlags::SHADER_BUFFER) {
+	if (u32(flags & BufferFlags::SHADER_BUFFER)) {
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 		srv_desc.Format = DXGI_FORMAT_R32_TYPELESS;
 		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
@@ -1253,7 +1253,7 @@ void createBuffer(BufferHandle buffer, u32 flags, size_t size, const void* data)
 
 		d3d->device->CreateShaderResourceView(buffer->buffer, &srv_desc, &buffer->srv);
 
-		if (flags & (u32)BufferFlags::COMPUTE_WRITE) {
+		if (u32(flags & BufferFlags::COMPUTE_WRITE)) {
 			D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
 			uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
 			uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
@@ -1300,14 +1300,14 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 	++attributes_count;
 }
 
-ID3D11SamplerState* getSampler(u32 flags) {
-	const u32 idx = flags & 0b1111;
+ID3D11SamplerState* getSampler(TextureFlags flags) {
+	const u32 idx = (u32)flags & 0b1111;
 	if (!d3d->samplers[idx]) {
 		D3D11_SAMPLER_DESC sampler_desc = {};
-		sampler_desc.Filter = (flags & (u32)TextureFlags::POINT_FILTER) ? D3D11_FILTER_MIN_MAG_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-		sampler_desc.AddressU = (flags & (u32)TextureFlags::CLAMP_U) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
-		sampler_desc.AddressV = (flags & (u32)TextureFlags::CLAMP_V) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
-		sampler_desc.AddressW = (flags & (u32)TextureFlags::CLAMP_W) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
+		sampler_desc.Filter = u32(flags & TextureFlags::POINT_FILTER) ? D3D11_FILTER_MIN_MAG_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+		sampler_desc.AddressU = u32(flags & TextureFlags::CLAMP_U) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
+		sampler_desc.AddressV = u32(flags & TextureFlags::CLAMP_V) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
+		sampler_desc.AddressW = u32(flags & TextureFlags::CLAMP_W) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
 		sampler_desc.MipLODBias = 0.f;
 		sampler_desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
 		sampler_desc.MinLOD = 0.f;
@@ -1318,7 +1318,7 @@ ID3D11SamplerState* getSampler(u32 flags) {
 	return d3d->samplers[idx];
 }
 
-bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, const char* debug_name) { 
+bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags flags, const char* debug_name) { 
 	ASSERT(debug_name && debug_name[0]);
 	ASSERT(handle);
 	checkThread();
@@ -1379,7 +1379,7 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	}
 
 	const bool is_cubemap = (hdr.caps2.dwCaps2 & DDS::DDSCAPS2_CUBEMAP) != 0;
-	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
+	const bool is_srgb = u32(flags & TextureFlags::SRGB);
 	const DXGI_FORMAT internal_format = is_srgb ? li->srgb_format : li->format;
 	const u32 mip_count = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
 	Texture& texture = *handle;
@@ -1501,16 +1501,16 @@ bool loadTexture(TextureHandle handle, const void* data, int size, u32 flags, co
 	return true;
 }
 
-bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, u32 flags, const void* data, const char* debug_name)
+bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const void* data, const char* debug_name)
 {
 	ASSERT(handle);
-	const bool is_srgb = flags & (u32)TextureFlags::SRGB;
-	const bool no_mips = flags & (u32)TextureFlags::NO_MIPS;
-	const bool readback = flags & (u32)TextureFlags::READBACK;
-	const bool is_3d = flags & (u32)TextureFlags::IS_3D;
-	const bool is_cubemap = flags & (u32)TextureFlags::IS_CUBE;
-	const bool compute_write = flags & (u32)TextureFlags::COMPUTE_WRITE;
-	const bool is_render_target = flags & (u32)TextureFlags::RENDER_TARGET;
+	const bool is_srgb = u32(flags & TextureFlags::SRGB);
+	const bool no_mips = u32(flags & TextureFlags::NO_MIPS);
+	const bool readback = u32(flags & TextureFlags::READBACK);
+	const bool is_3d = u32(flags & TextureFlags::IS_3D);
+	const bool is_cubemap = u32(flags & TextureFlags::IS_CUBE);
+	const bool compute_write = u32(flags & TextureFlags::COMPUTE_WRITE);
+	const bool is_render_target = u32(flags & TextureFlags::RENDER_TARGET);
 
 	switch (format) {
 		case TextureFormat::R8:
@@ -1649,18 +1649,18 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	return true;
 }
 
-void setState(u64 state)
+void setState(StateFlags state)
 {
-	auto iter = d3d->state_cache.find(state);
+	auto iter = d3d->state_cache.find((u64)state);
 	if (!iter.isValid()) {
 		D3D11_BLEND_DESC blend_desc = {};
 		D3D11_RASTERIZER_DESC desc = {};
 		D3D11_DEPTH_STENCIL_DESC depthStencilDesc = {};
 	
-		if (state & u64(StateFlags::CULL_BACK)) {
+		if (u64(state & StateFlags::CULL_BACK)) {
 			desc.CullMode = D3D11_CULL_BACK;
 		}
-		else if(state & u64(StateFlags::CULL_FRONT)) {
+		else if(u64(state & StateFlags::CULL_FRONT)) {
 			desc.CullMode = D3D11_CULL_FRONT;
 		}
 		else {
@@ -1668,20 +1668,20 @@ void setState(u64 state)
 		}
 
 		desc.FrontCounterClockwise = TRUE;
-		desc.FillMode =  (state & u64(StateFlags::WIREFRAME)) != 0 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
-		desc.ScissorEnable = (state & u64(StateFlags::SCISSOR_TEST)) != 0;
+		desc.FillMode =  u64(state & StateFlags::WIREFRAME) ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
+		desc.ScissorEnable = u64(state & StateFlags::SCISSOR_TEST) != 0;
 		desc.DepthClipEnable = FALSE;
 
-		depthStencilDesc.DepthEnable = (state & u64(StateFlags::DEPTH_TEST)) != 0;
-		depthStencilDesc.DepthWriteMask = (state & u64(StateFlags::DEPTH_WRITE)) != 0 ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-		depthStencilDesc.DepthFunc = (state & u64(StateFlags::DEPTH_TEST)) != 0 ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_ALWAYS;
+		depthStencilDesc.DepthEnable = u64(state & StateFlags::DEPTH_TEST) != 0;
+		depthStencilDesc.DepthWriteMask = u64(state & StateFlags::DEPTH_WRITE) ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+		depthStencilDesc.DepthFunc = u64(state & StateFlags::DEPTH_TEST) ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_ALWAYS;
 
-		const StencilFuncs func = (StencilFuncs)((state >> 30) & 0xf);
+		const StencilFuncs func = (StencilFuncs)((u64(state) >> 30) & 0xf);
 		depthStencilDesc.StencilEnable = func != StencilFuncs::DISABLE; 
 		if(depthStencilDesc.StencilEnable) {
 
-			depthStencilDesc.StencilReadMask = u8(state >> 42);
-			depthStencilDesc.StencilWriteMask = u8(state >> 22);
+			depthStencilDesc.StencilReadMask = u8(u64(state) >> 42);
+			depthStencilDesc.StencilWriteMask = u8(u64(state) >> 22);
 			D3D11_COMPARISON_FUNC dx_func;
 			switch(func) {
 				case StencilFuncs::ALWAYS: dx_func = D3D11_COMPARISON_ALWAYS; break;
@@ -1702,9 +1702,9 @@ void setState(u64 state)
 				};
 				return table[(int)op];
 			};
-			const D3D11_STENCIL_OP sfail = toDXOp(StencilOps((state >> 50) & 0xf));
-			const D3D11_STENCIL_OP zfail = toDXOp(StencilOps((state >> 54) & 0xf));
-			const D3D11_STENCIL_OP zpass = toDXOp(StencilOps((state >> 58) & 0xf));
+			const D3D11_STENCIL_OP sfail = toDXOp(StencilOps((u64(state) >> 50) & 0xf));
+			const D3D11_STENCIL_OP zfail = toDXOp(StencilOps((u64(state) >> 54) & 0xf));
+			const D3D11_STENCIL_OP zpass = toDXOp(StencilOps((u64(state) >> 58) & 0xf));
 
 			depthStencilDesc.FrontFace.StencilFailOp = sfail;
 			depthStencilDesc.FrontFace.StencilDepthFailOp = zfail;
@@ -1717,7 +1717,7 @@ void setState(u64 state)
 			depthStencilDesc.BackFace.StencilFunc = dx_func;
 		}
 
-		u16 blend_bits = u16(state >> 6);
+		u16 blend_bits = u16(u64(state) >> 6);
 
 		auto to_dx = [&](BlendFactors factor) -> D3D11_BLEND {
 			static const D3D11_BLEND table[] = {
@@ -1774,11 +1774,11 @@ void setState(u64 state)
 		d3d->device->CreateRasterizerState(&desc, &s.rs);
 		d3d->device->CreateBlendState(&blend_desc, &s.bs);
 
-		d3d->state_cache.insert(state, s);
-		iter = d3d->state_cache.find(state);
+		d3d->state_cache.insert((u64)state, s);
+		iter = d3d->state_cache.find((u64)state);
 	}
 
-	const u8 stencil_ref = u8(state >> 34);
+	const u8 stencil_ref = u8(u64(state) >> 34);
 	const D3D::State& s = iter.value();
 
 	float blend_factor[4] = {};
@@ -1884,11 +1884,11 @@ void destroy(BufferHandle buffer) {
 	LUMIX_DELETE(d3d->allocator, buffer);
 }
 
-void bindShaderBuffer(BufferHandle buffer, u32 binding_point, u32 flags)
+void bindShaderBuffer(BufferHandle buffer, u32 binding_point, BindShaderBufferFlags flags)
 {
 	if(buffer) {
 		Buffer& b = *buffer;
-		if (flags & (u32)BindShaderBufferFlags::OUTPUT && b.uav) {
+		if (u32(flags & BindShaderBufferFlags::OUTPUT) && b.uav) {
 			d3d->device_ctx->CSSetUnorderedAccessViews(binding_point, 1, &b.uav, nullptr);
 			b.bound_to_output = binding_point;
 			d3d->bound_uavs[binding_point] = buffer;
