@@ -1841,7 +1841,7 @@ void drawTriangles(u32 bytes_offset, u32 indices_count, DataType index_type) {
 	d3d->device_ctx->DrawIndexed(indices_count, 0, 0);
 }
 
-void drawArrays(u32 offset, u32 count, PrimitiveType type)
+void drawArrays(PrimitiveType type, u32 offset, u32 count)
 {
 	D3D11_PRIMITIVE_TOPOLOGY topology;
 	switch(type) {
@@ -2027,7 +2027,7 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 	d3d->device_ctx->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
 
-void drawElements(u32 offset, u32 count, PrimitiveType primitive_type, DataType index_type) {
+void drawElements(PrimitiveType primitive_type, u32 offset, u32 count, DataType index_type) {
 	ASSERT(d3d->current_index_buffer);
 	D3D11_PRIMITIVE_TOPOLOGY pt;
 	switch (primitive_type) {

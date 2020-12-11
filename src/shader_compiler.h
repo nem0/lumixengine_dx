@@ -274,7 +274,7 @@ struct ShaderCompiler {
 	};
 
 	void save(const char* filename) {
-		OS::OutputFile file;
+		os::OutputFile file;
 		if (file.open(filename)) {
 			u32 version = 0;
 			bool success = file.write(&version, sizeof(version));
@@ -296,7 +296,7 @@ struct ShaderCompiler {
 	}
 
 	void load(const char* filename) {
-		OS::InputFile file;
+		os::InputFile file;
 		if (file.open(filename)) {
 			u32 version;
 			if (!file.read(&version, sizeof(version))) {

@@ -2304,7 +2304,7 @@ void drawTriangles(u32 offset_bytes, u32 indices_count, DataType index_type) {
 	drawTrianglesInstancedInternal(offset_bytes, indices_count, 1, index_type);
 }
 
-void drawArrays(u32 offset, u32 count, PrimitiveType type) {
+void drawArrays(PrimitiveType type, u32 offset, u32 count) {
 	ASSERT(d3d->current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt;
@@ -2540,7 +2540,7 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 	drawTrianglesInstancedInternal(0, indices_count, instances_count, index_type);
 }
 
-void drawElements(u32 offset_bytes, u32 count, PrimitiveType primitive_type, DataType index_type) {
+void drawElements(PrimitiveType primitive_type, u32 offset_bytes, u32 count, DataType index_type) {
 	D3D12_PRIMITIVE_TOPOLOGY pt;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt;
 	switch (primitive_type) {
