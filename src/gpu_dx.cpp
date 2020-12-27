@@ -10,6 +10,7 @@
 #include "engine/os.h"
 #include "engine/sync.h"
 #include "engine/stream.h"
+#include "engine/string.h"
 #include "shader_compiler.h"
 #include <Windows.h>
 #include <d3d11_1.h>
