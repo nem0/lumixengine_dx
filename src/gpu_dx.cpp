@@ -50,7 +50,7 @@ static void toWChar(WCHAR (&out)[N], const char* in)
 	*cout = 0;
 }
 
-static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
+static DXGI_FORMAT getDXGIFormat(const Attribute& attr, bool as_int) {
 	switch (attr.type) {
 		case AttributeType::FLOAT: 
 			switch(attr.components_count) {
@@ -62,21 +62,21 @@ static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
 			break;
 		case AttributeType::I8: 
 			switch(attr.components_count) {
-				case 1: return DXGI_FORMAT_R8_SNORM;
-				case 2: return DXGI_FORMAT_R8G8_SNORM;
-				case 4: return DXGI_FORMAT_R8G8B8A8_SNORM;
+				case 1: return as_int ? DXGI_FORMAT_R8_SINT : DXGI_FORMAT_R8_SNORM;
+				case 2: return as_int ? DXGI_FORMAT_R8G8_SINT : DXGI_FORMAT_R8G8_SNORM;
+				case 4: return as_int ? DXGI_FORMAT_R8G8B8A8_SINT : DXGI_FORMAT_R8G8B8A8_SNORM;
 			}
 			break;
 		case AttributeType::U8: 
 			switch(attr.components_count) {
-				case 1: return DXGI_FORMAT_R8_UNORM;
-				case 2: return DXGI_FORMAT_R8G8_UNORM;
-				case 4: return DXGI_FORMAT_R8G8B8A8_UNORM;
+				case 1: return as_int ? DXGI_FORMAT_R8_UINT : DXGI_FORMAT_R8_UNORM;
+				case 2: return as_int ? DXGI_FORMAT_R8G8_UINT : DXGI_FORMAT_R8G8_UNORM;
+				case 4: return as_int ? DXGI_FORMAT_R8G8B8A8_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
 			}
 			break;
 		case AttributeType::I16: 
 			switch(attr.components_count) {
-				case 4: return DXGI_FORMAT_R16G16B16A16_SINT;
+				case 4: return as_int ? DXGI_FORMAT_R16G16B16A16_SINT : DXGI_FORMAT_R16G16B16A16_SNORM;
 			}
 			break;
 	}
@@ -292,9 +292,10 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 		D3D11_INPUT_ELEMENT_DESC descs[16];
 		for (u8 i = 0; i < decl.attributes_count; ++i) {
 			const Attribute& attr = decl.attributes[i];
+			const bool as_int = attr.flags & Attribute::AS_INT;
 			const bool instanced = attr.flags & Attribute::INSTANCED;
 			descs[i].AlignedByteOffset = attr.byte_offset;
-			descs[i].Format = getDXGIFormat(attr);
+			descs[i].Format = getDXGIFormat(attr, as_int);
 			descs[i].SemanticIndex = attr.idx;
 			descs[i].SemanticName = "TEXCOORD";
 			descs[i].InputSlot = instanced ? 1 : 0;
