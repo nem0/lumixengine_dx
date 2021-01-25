@@ -87,6 +87,7 @@ static DXGI_FORMAT getDXGIFormat(const Attribute& attr, bool as_int) {
 static u32 getSize(DXGI_FORMAT format) {
 	switch(format) {
 		case DXGI_FORMAT_R8_UNORM: return 1;
+		case DXGI_FORMAT_R8G8_UNORM: return 2;
 		case DXGI_FORMAT_R32_TYPELESS: return 4;
 		case DXGI_FORMAT_R24G8_TYPELESS: return 4;
 		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 4;
@@ -117,6 +118,7 @@ int getSize(AttributeType type) {
 static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 	switch (format) {
 		case TextureFormat::R8: return DXGI_FORMAT_R8_UNORM;
+		case TextureFormat::RG8: return DXGI_FORMAT_R8G8_UNORM;
 		case TextureFormat::D32: return DXGI_FORMAT_R32_TYPELESS;
 		case TextureFormat::D24: return DXGI_FORMAT_R32_TYPELESS;
 		case TextureFormat::D24S8: return DXGI_FORMAT_R24G8_TYPELESS;
@@ -1523,6 +1525,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::SRGB:
 		case TextureFormat::SRGBA: break;
 		
+		case TextureFormat::RG8:
 		case TextureFormat::R16:
 		case TextureFormat::RGBA16:
 		case TextureFormat::R16F: 

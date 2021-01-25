@@ -139,23 +139,24 @@ static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
 				case 4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
 			}
 			break;
-		case AttributeType::I8:
-			switch (attr.components_count) {
-				case 1: return DXGI_FORMAT_R8_SNORM;
-				case 2: return DXGI_FORMAT_R8G8_SNORM;
-				case 4: return DXGI_FORMAT_R8G8B8A8_SNORM;
+
+		case AttributeType::I8: 
+			switch(attr.components_count) {
+				case 1: return as_int ? DXGI_FORMAT_R8_SINT : DXGI_FORMAT_R8_SNORM;
+				case 2: return as_int ? DXGI_FORMAT_R8G8_SINT : DXGI_FORMAT_R8G8_SNORM;
+				case 4: return as_int ? DXGI_FORMAT_R8G8B8A8_SINT : DXGI_FORMAT_R8G8B8A8_SNORM;
 			}
 			break;
-		case AttributeType::U8:
-			switch (attr.components_count) {
-				case 1: return DXGI_FORMAT_R8_UNORM;
-				case 2: return DXGI_FORMAT_R8G8_UNORM;
-				case 4: return DXGI_FORMAT_R8G8B8A8_UNORM;
+		case AttributeType::U8: 
+			switch(attr.components_count) {
+				case 1: return as_int ? DXGI_FORMAT_R8_UINT : DXGI_FORMAT_R8_UNORM;
+				case 2: return as_int ? DXGI_FORMAT_R8G8_UINT : DXGI_FORMAT_R8G8_UNORM;
+				case 4: return as_int ? DXGI_FORMAT_R8G8B8A8_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
 			}
 			break;
-		case AttributeType::I16:
-			switch (attr.components_count) {
-				case 4: return DXGI_FORMAT_R16G16B16A16_SINT;
+		case AttributeType::I16: 
+			switch(attr.components_count) {
+				case 4: return as_int ? DXGI_FORMAT_R16G16B16A16_SINT : DXGI_FORMAT_R16G16B16A16_SNORM;
 			}
 			break;
 	}
@@ -166,6 +167,7 @@ static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
 static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 	switch (format) {
 		case TextureFormat::R8: return DXGI_FORMAT_R8_UNORM;
+		case TextureFormat::RG8: return DXGI_FORMAT_R8G8_UNORM;
 		case TextureFormat::D32: return DXGI_FORMAT_R32_TYPELESS;
 		case TextureFormat::D24: return DXGI_FORMAT_R32_TYPELESS;
 		case TextureFormat::D24S8: return DXGI_FORMAT_R24G8_TYPELESS;
@@ -2068,6 +2070,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::SRGB:
 		case TextureFormat::SRGBA: break;
 
+		case TextureFormat::R8G8:
 		case TextureFormat::R16:
 		case TextureFormat::RGBA16:
 		case TextureFormat::R16F:
