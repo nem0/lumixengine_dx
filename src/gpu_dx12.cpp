@@ -7,6 +7,7 @@
 #include "engine/log.h"
 #include "engine/math.h"
 #include "engine/stream.h"
+#include "engine/string.h"
 #include "engine/sync.h"
 #include "renderer/gpu/dds.h"
 #include "renderer/gpu/gpu.h"
@@ -130,6 +131,7 @@ int getSize(AttributeType type) {
 }
 
 static DXGI_FORMAT getDXGIFormat(const Attribute& attr) {
+	const bool as_int = attr.flags & Attribute::AS_INT;
 	switch (attr.type) {
 		case AttributeType::FLOAT:
 			switch (attr.components_count) {
@@ -2070,7 +2072,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::SRGB:
 		case TextureFormat::SRGBA: break;
 
-		case TextureFormat::R8G8:
+		case TextureFormat::RG8:
 		case TextureFormat::R16:
 		case TextureFormat::RGBA16:
 		case TextureFormat::R16F:
