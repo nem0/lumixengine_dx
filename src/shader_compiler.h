@@ -131,20 +131,21 @@ struct ShaderCompiler {
 	{
 		ASSERT(input.srcs.length() == input.types.length());
 		out[0] = getTypeDefine(type);
+		out[1] = "#define LUMIX_DX_SHADER\n";
 		for(u32 i = 0; i < input.prefixes.length(); ++i) {
-			out[i + 1] = input.prefixes[i];
+			out[i + 2] = input.prefixes[i];
 		}
 		for (u32 i = 0; i < input.decl.attributes_count; ++i) {
-			out[i + 1 + input.prefixes.length()] = getAttrDefine(input.decl.attributes[i].idx); 
+			out[i + 2 + input.prefixes.length()] = getAttrDefine(input.decl.attributes[i].idx); 
 		}
 
 		u32 sc = 0;
 		for(u32 i = 0; i < input.srcs.length(); ++i) {
 			if(input.types[i] != type) continue;
-			out[input.prefixes.length() + input.decl.attributes_count + sc + 1] = input.srcs[i];
+			out[input.prefixes.length() + input.decl.attributes_count + sc + 2] = input.srcs[i];
 			++sc;
 		}
-		return sc ? sc + input.prefixes.length() + input.decl.attributes_count + 1 : 0;
+		return sc ? sc + input.prefixes.length() + input.decl.attributes_count + 2 : 0;
 	};
 
 	static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out, Ref<u32> readonly_bitset, Ref<u32> used_bitset) {
