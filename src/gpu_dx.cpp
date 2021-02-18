@@ -1699,7 +1699,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	else {
 		fill_desc(desc_2d);
 		desc_2d.SampleDesc.Count = 1;
-		desc_2d.ArraySize = is_cubemap ? 6 : depth;
+		desc_2d.ArraySize = is_cubemap ? 6 * depth : depth;
 		desc_2d.MiscFlags |= is_cubemap ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
 	}
 
