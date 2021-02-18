@@ -183,6 +183,9 @@ static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 		case TextureFormat::R16F: return DXGI_FORMAT_R16_FLOAT;
 		case TextureFormat::R32F: return DXGI_FORMAT_R32_FLOAT;
 		case TextureFormat::RG32F: return DXGI_FORMAT_R32G32_FLOAT;
+		case TextureFormat::BC1: return DXGI_FORMAT_BC1_UNORM;
+		case TextureFormat::BC2: return DXGI_FORMAT_BC2_UNORM;
+		case TextureFormat::BC3: return DXGI_FORMAT_BC3_UNORM;
 	}
 	ASSERT(false);
 	return DXGI_FORMAT_R8G8B8A8_UINT;
@@ -1891,6 +1894,11 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 	++attributes_count;
 }
 
+bool loadLayers(TextureHandle handle, u32 layer_offset, const void* data, int size, const char* debug_name) {
+	ASSERT(false);
+	return false; // TODO
+}
+
 bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags flags, const char* debug_name) {
 	checkThread();
 	ASSERT(debug_name && debug_name[0]);
@@ -2070,7 +2078,10 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::R32F:
 		case TextureFormat::RG32F:
 		case TextureFormat::SRGB:
-		case TextureFormat::SRGBA: break;
+		case TextureFormat::SRGBA:
+		case TextureFormat::BC1:
+		case TextureFormat::BC2:
+		case TextureFormat::BC3: break;
 
 		case TextureFormat::RG8:
 		case TextureFormat::R16:
@@ -2165,10 +2176,10 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		texture.resource->SetName(tmp);
 	}
 
-	const u32 bytes_per_pixel = getSize(desc.Format);
 	Array<Array<u8>> mips_data(d3d->allocator);
 	mips_data.reserve(mip_count - 1);
 	if (data) {
+		const u32 bytes_per_pixel = getSize(desc.Format);
 		D3D12_SUBRESOURCE_DATA* srd = (D3D12_SUBRESOURCE_DATA*)_alloca(sizeof(D3D12_SUBRESOURCE_DATA) * mip_count * (is_cubemap ? 6 : depth));
 		const u8* ptr = (u8*)data;
 
