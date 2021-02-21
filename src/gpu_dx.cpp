@@ -2097,6 +2097,7 @@ void bindImageTexture(TextureHandle handle, u32 unit) {
 	if (handle) {
 		Texture& texture = *handle;
 		texture.bound_to_output = unit;
+		ASSERT(texture.uav);
 		d3d->device_ctx->CSSetUnorderedAccessViews(unit, 1, &texture.uav, nullptr);
 		d3d->bound_image_textures[unit] = handle;
 	}
