@@ -283,11 +283,11 @@ struct ShaderCompiler {
 				const u32 hash = iter.key();
 				const CachedShader& s = iter.value();
 				const u32 size = (u32)s.data.size();
-				success = success || file.write(&hash, sizeof(hash));
-				success = success || file.write(&size, sizeof(size));
-				success = success || file.write(s.data.data(), size);
-				success = success || file.write(&s.readonly_bitset, sizeof(s.readonly_bitset));
-				success = success || file.write(&s.used_srvs_bitset, sizeof(s.used_srvs_bitset));
+				success = file.write(&hash, sizeof(hash)) && success;
+				success = file.write(&size, sizeof(size)) && success;
+				success = file.write(s.data.data(), size) && success;
+				success = file.write(&s.readonly_bitset, sizeof(s.readonly_bitset)) && success;
+				success = file.write(&s.used_srvs_bitset, sizeof(s.used_srvs_bitset)) && success;
 			}
 			if (!success) {
 				logError("Could not write ", filename);
