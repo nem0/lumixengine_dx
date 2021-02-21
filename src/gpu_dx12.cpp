@@ -736,6 +736,7 @@ struct Frame {
 
 	bool init(ID3D12Device* device) {
 		if (device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmd_allocator)) != S_OK) return false;
+		if (device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)) != S_OK) return false;
 
 		scratch_buffer = createBuffer(device, nullptr, SCRATCH_BUFFER_SIZE, D3D12_HEAP_TYPE_UPLOAD);
 
@@ -743,26 +744,24 @@ struct Frame {
 		scratch_buffer_ptr = scratch_buffer_begin;
 
 		query_buffer = createBuffer(device, nullptr, sizeof(u64) * QUERY_COUNT, D3D12_HEAP_TYPE_READBACK);
+	
 
 		return true;
 	}
 
 	bool isFinished() {
-		DWORD res = ::WaitForSingleObject(fence_event, 0);
-		return res == WAIT_OBJECT_0;
+		return fence->GetCompletedValue() == fence_value;
 	}
 
 	void wait() {
-		if (!fence_event) return;
-
-		::WaitForSingleObject(fence_event, INFINITE);
-		CloseHandle(fence_event);
-		fence_event = nullptr;
+		if (fence_value != 0) {
+			fence->SetEventOnCompletion(fence_value, nullptr);
+		}
 	}
 
 	void begin();
 
-	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12Fence* fence, ID3D12QueryHeap* query_heap, Ref<u64> fence_value) {
+	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12QueryHeap* query_heap) {
 		query_buffer->Unmap(0, nullptr);
 		for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
 			QueryHandle q = to_resolve[i];
@@ -777,10 +776,6 @@ struct Frame {
 		++fence_value;
 		hr = cmd_queue->Signal(fence, fence_value);
 		ASSERT(hr == S_OK);
-		ASSERT(!fence_event);
-		fence_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-		hr = fence->SetEventOnCompletion(fence_value, fence_event);
-		ASSERT(hr == S_OK);
 	}
 
 	ID3D12Resource* scratch_buffer = nullptr;
@@ -789,7 +784,8 @@ struct Frame {
 	ID3D12CommandAllocator* cmd_allocator = nullptr;
 	Array<IUnknown*> to_release;
 	Array<u32> to_heap_release;
-	HANDLE fence_event = nullptr;
+	ID3D12Fence* fence = nullptr;
+	u64 fence_value = 0;
 	Array<Query*> to_resolve;
 	ID3D12Resource* query_buffer;
 	u8* query_buffer_ptr;
@@ -826,14 +822,12 @@ struct D3D {
 	ID3D12Device* device = nullptr;
 	ID3D12RootSignature* root_signature = nullptr;
 	ID3D12Debug* debug = nullptr;
-	ID3D12Fence* fence = nullptr;
-	u64 fence_value = 0;
 	ID3D12CommandQueue* cmd_queue = nullptr;
 	u64 query_frequency = 1;
 	BufferHandle current_indirect_buffer = INVALID_BUFFER;
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	ProgramHandle current_program = INVALID_PROGRAM;
-	SRV current_srvs[10];
+	SRV current_srvs[12];
 	TextureFlags current_sampler_flags[10] = {};
 	bool dirty_samplers = true;
 	StateFlags current_state = StateFlags::NONE;
@@ -876,6 +870,7 @@ void Frame::begin() {
 void Frame::clear() {
 	for (IUnknown* res : to_release) res->Release();
 	for (u32 i : to_heap_release) d3d->srv_heap.free(i);
+	fence->Release();
 		
 	to_release.clear();
 	to_heap_release.clear();
@@ -886,7 +881,7 @@ void Frame::clear() {
 
 
 LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const SRV* srvs, u32 count) {
-	u16 flags[10];
+	u16 flags[12];
 	ASSERT(count <= lengthOf(flags));
 	for (u32 i = 0; i < count; ++i) {
 		if (srvs[i].texture) {
@@ -1293,7 +1288,6 @@ void shutdown() {
 	
 	d3d->root_signature->Release();
 	d3d->query_heap->Release();
-	d3d->fence->Release();
 	d3d->cmd_queue->Release();
 	d3d->cmd_list->Release();
 	if(d3d->debug) d3d->debug->Release();
@@ -1509,8 +1503,6 @@ bool init(void* hwnd, InitFlags flags) {
 	for (Frame& f : d3d->frames) {
 		if (!f.init(d3d->device)) return false;
 	}
-
-	if (d3d->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&d3d->fence)) != S_OK) return false;
 
 	if (d3d->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, d3d->frames[0].cmd_allocator, NULL, IID_PPV_ARGS(&d3d->cmd_list)) != S_OK) return false;
 	d3d->cmd_list->Close();
@@ -1732,7 +1724,7 @@ u32 swapBuffers() {
 		switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 	}
 
-	d3d->frame->end(d3d->cmd_queue, d3d->cmd_list, d3d->fence, d3d->query_heap, Ref(d3d->fence_value));
+	d3d->frame->end(d3d->cmd_queue, d3d->cmd_list, d3d->query_heap);
 	const u32 res = u32(d3d->frame - d3d->frames.begin());
 
 	++d3d->frame;
@@ -2394,7 +2386,7 @@ void destroy(BufferHandle buffer) {
 }
 
 void bindShaderBuffer(BufferHandle buffer, u32 binding_point, BindShaderBufferFlags flags) {
-	ASSERT(binding_point < 10);
+	ASSERT(binding_point < lengthOf(d3d->current_srvs));
 	d3d->current_srvs[binding_point].texture = INVALID_TEXTURE;
 	d3d->current_srvs[binding_point].buffer = buffer;
 }
