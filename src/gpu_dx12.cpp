@@ -1886,9 +1886,34 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 	++attributes_count;
 }
 
+// we are using staging texture, which is wasteful, but good enough for now
 bool loadLayers(TextureHandle handle, u32 layer_offset, const void* data, int size, const char* debug_name) {
-	ASSERT(false);
-	return false; // TODO
+	const D3D12_RESOURCE_STATES prev_state = handle->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
+	
+	TextureHandle staging = allocTextureHandle();
+	loadTexture(staging, data, size, TextureFlags::NONE, "staging");
+	staging->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	D3D12_TEXTURE_COPY_LOCATION dst = {};
+	dst.pResource = handle->resource;
+	dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	const gpu::TextureInfo info = gpu::getTextureInfo(data);
+	D3D12_TEXTURE_COPY_LOCATION src = {};
+	src.pResource = staging->resource;
+	src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	
+	for (i32 src_layer = 0; src_layer < info.layers; ++src_layer) {
+		for (u32 side = 0; side < (info.is_cubemap ? 6u : 1u); ++side) {
+			for (i32 mip = 0; mip < info.mips; ++mip) {
+				dst.SubresourceIndex = mip + ((layer_offset + src_layer) * (info.is_cubemap ? 6 : 1) + side) * info.mips;
+				src.SubresourceIndex = mip + (src_layer * (info.is_cubemap ? 6 : 1) + side) * info.mips;
+				d3d->cmd_list->CopyTextureRegion(&dst, 0, 0, layer_offset, &src, nullptr);
+			}
+		}
+	}
+	destroy(staging);
+	handle->setState(d3d->cmd_list, prev_state);
+
+	return true;
 }
 
 bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags flags, const char* debug_name) {
@@ -2098,7 +2123,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	desc.Dimension = is_3d ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	desc.Width = w;
 	desc.Height = h;
-	desc.DepthOrArraySize = depth;
+	desc.DepthOrArraySize = depth * (is_cubemap ? 6 : 1);
 	desc.MipLevels = mip_count;
 	desc.Format = getDXGIFormat(format);
 	desc.SampleDesc.Count = 1;
@@ -2148,6 +2173,26 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		uav_desc.Texture3D.MipSlice = 0;
 		uav_desc.Texture3D.FirstWSlice = 0;
 		uav_desc.Texture3D.WSize = -1;
+	} else if (is_cubemap && depth <= 1) {
+		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+		srv_desc.TextureCube.MipLevels = mip_count;
+		srv_desc.TextureCube.MostDetailedMip = 0;
+		srv_desc.TextureCube.ResourceMinLODClamp = 0;
+
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+		uav_desc.Texture2D.MipSlice = 0;
+		uav_desc.Texture2D.PlaneSlice = 0;
+	} else if (is_cubemap && depth > 1) {
+		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+		srv_desc.TextureCubeArray.MipLevels = mip_count;
+		srv_desc.TextureCubeArray.MostDetailedMip = 0;
+		srv_desc.TextureCubeArray.ResourceMinLODClamp = 0;
+		srv_desc.TextureCubeArray.First2DArrayFace = 0;
+		srv_desc.TextureCubeArray.NumCubes = depth;
+
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+		uav_desc.Texture2D.MipSlice = 0;
+		uav_desc.Texture2D.PlaneSlice = 0;
 	} else {
 		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srv_desc.Texture2D.MipLevels = mip_count;
