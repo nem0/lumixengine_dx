@@ -120,7 +120,6 @@ static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
 		case TextureFormat::R8: return DXGI_FORMAT_R8_UNORM;
 		case TextureFormat::RG8: return DXGI_FORMAT_R8G8_UNORM;
 		case TextureFormat::D32: return DXGI_FORMAT_R32_TYPELESS;
-		case TextureFormat::D24: return DXGI_FORMAT_R32_TYPELESS;
 		case TextureFormat::D24S8: return DXGI_FORMAT_R24G8_TYPELESS;
 		//case TextureFormat::SRGB: return DXGI_FORMAT_R32_FLOAT;
 		case TextureFormat::SRGBA: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
@@ -978,6 +977,16 @@ void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, Frame
 
 	if (ds) {
 		Texture& t = *ds;
+
+		if (t.bound_to_input != 0xffFFffFF && d3d->bound_textures[t.bound_to_input] == &t) {
+			ID3D11ShaderResourceView* empty = nullptr;
+			d3d->device_ctx->VSSetShaderResources(t.bound_to_input, 1, &empty);
+			d3d->device_ctx->PSSetShaderResources(t.bound_to_input, 1, &empty);
+			d3d->device_ctx->CSSetShaderResources(t.bound_to_input, 1, &empty);
+			d3d->bound_textures[t.bound_to_input] = INVALID_TEXTURE;
+			t.bound_to_input = 0xffFFffFF;
+		}
+
 		if(readonly_ds && !t.dsv_ro) {
 			D3D11_DEPTH_STENCIL_VIEW_DESC desc = {};
 			desc.Format = toDSViewFormat(t.dxgi_format);
