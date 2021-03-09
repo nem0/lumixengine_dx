@@ -222,13 +222,13 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 		: ShaderCompiler(allocator)
 	{}
 
-	static bool create(ID3D11Device* device, ShaderType type, const void* ptr, size_t len, Ref<Program> program) {
+	static bool create(ID3D11Device* device, ShaderType type, const void* ptr, size_t len, Program& program) {
 		HRESULT hr;
 		switch(type) {
-			case ShaderType::VERTEX: hr = device->CreateVertexShader(ptr, len, nullptr, &program->vs); break;
-			case ShaderType::FRAGMENT: hr = device->CreatePixelShader(ptr, len, nullptr, &program->ps); break;
-			case ShaderType::GEOMETRY: hr = device->CreateGeometryShader(ptr, len, nullptr, &program->gs); break;
-			case ShaderType::COMPUTE: hr = device->CreateComputeShader(ptr, len, nullptr, &program->cs); break;
+			case ShaderType::VERTEX: hr = device->CreateVertexShader(ptr, len, nullptr, &program.vs); break;
+			case ShaderType::FRAGMENT: hr = device->CreatePixelShader(ptr, len, nullptr, &program.ps); break;
+			case ShaderType::GEOMETRY: hr = device->CreateGeometryShader(ptr, len, nullptr, &program.gs); break;
+			case ShaderType::COMPUTE: hr = device->CreateComputeShader(ptr, len, nullptr, &program.cs); break;
 			default: ASSERT(false); break;
 		}
 		return SUCCEEDED(hr);
@@ -237,7 +237,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 	bool compile(ID3D11Device* device
 		, const Input& input
 		, const char* name
-		, Ref<Program> program)
+		, Program& program)
 	{
 		auto compile_stage = [&](ShaderType type){
 			const char* tmp[128];
@@ -256,7 +256,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 				}
 				std::string hlsl;
 				u32 dummy;
-				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(dummy), Ref(dummy))) {
+				if (!glsl2hlsl(tmp, c, type, name, hlsl, dummy, dummy)) {
 					return false;
 				}
 				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name, 0, 0);
@@ -278,10 +278,10 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 		if (!compiled) return false;
 
 		if (name && name[0]) {
-			if(program->vs) program->vs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
-			if(program->ps) program->ps->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
-			if(program->gs) program->gs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
-			if(program->cs) program->cs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
+			if(program.vs) program.vs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
+			if(program.ps) program.ps->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
+			if(program.gs) program.gs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
+			if(program.cs) program.cs->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(name), name);
 		}
 
 		return true;
@@ -291,7 +291,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 		, const VertexDecl& decl
 		, const void* bytecode
 		, size_t bytecode_size
-		, Ref<Program> program)
+		, Program& program)
 	{
 		D3D11_INPUT_ELEMENT_DESC descs[16];
 		for (u8 i = 0; i < decl.attributes_count; ++i) {
@@ -308,10 +308,10 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 		}
 
 		if (bytecode && decl.attributes_count > 0) {
-			device->CreateInputLayout(descs, decl.attributes_count, bytecode, bytecode_size, &program->il);
+			device->CreateInputLayout(descs, decl.attributes_count, bytecode, bytecode_size, &program.il);
 		}
 		else {
-			program->il = nullptr;
+			program.il = nullptr;
 		}
 	}
 };
@@ -1049,7 +1049,7 @@ void unmap(BufferHandle buffer)
 	buffer->mapped_ptr = nullptr;
 }
 
-bool getMemoryStats(Ref<MemoryStats> stats) { return false; }
+bool getMemoryStats(MemoryStats& stats) { return false; }
 
 void setCurrentWindow(void* window_handle)
 {
@@ -2222,7 +2222,7 @@ bool createProgram(ProgramHandle program, const VertexDecl& decl, const char** s
 
 	ShaderCompiler::Input args { decl, Span(srcs, num), Span(types, num), Span(prefixes, prefixes_count) };
 
-	if (!d3d->shader_compiler.compile(d3d->device, args, name, Ref(*program))) return false;
+	if (!d3d->shader_compiler.compile(d3d->device, args, name, *program)) return false;
 	return true;
 }
 

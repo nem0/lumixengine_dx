@@ -148,8 +148,8 @@ struct ShaderCompiler {
 		return sc ? sc + input.prefixes.length() + input.decl.attributes_count + 2 : 0;
 	};
 
-	static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, Ref<std::string> out, Ref<u32> readonly_bitset, Ref<u32> used_bitset) {
-		readonly_bitset.value = 0xffFFffFF;
+	static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, std::string& out, u32& readonly_bitset, u32& used_bitset) {
+		readonly_bitset = 0xffFFffFF;
 		glslang::TProgram p;
 		EShLanguage lang = EShLangVertex;
 		switch (type) {
@@ -201,31 +201,31 @@ struct ShaderCompiler {
 			for (spirv_cross::Resource& resource : resources.storage_buffers) {
 				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
 				spirv_cross::Bitset flags = hlsl.get_buffer_block_flags(resource.id);
-				used_bitset.value |= 1 << binding;
+				used_bitset |= 1 << binding;
 				const bool readonly = flags.get(spv::DecorationNonWritable);
 				if (readonly) {
-					readonly_bitset.value |= 1 << binding;
+					readonly_bitset |= 1 << binding;
 				}
 				else {
-					readonly_bitset.value &= ~(1 << binding);
+					readonly_bitset &= ~(1 << binding);
 				}
 			}
 
 			for (spirv_cross::Resource& resource : resources.sampled_images) {
 				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
-				used_bitset.value |= 1 << binding;
+				used_bitset |= 1 << binding;
 			}
 
 			for (spirv_cross::Resource& resource : resources.storage_images) {
 				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
 				spirv_cross::Bitset flags = hlsl.get_decoration_bitset(resource.id);
-				used_bitset.value |= 1 << binding;
+				used_bitset |= 1 << binding;
 				const bool readonly = flags.get(spv::DecorationNonWritable);
 				if (readonly) {
-					readonly_bitset.value |= 1 << binding;
+					readonly_bitset |= 1 << binding;
 				}
 				else {
-					readonly_bitset.value &= ~(1 << binding);
+					readonly_bitset &= ~(1 << binding);
 				}
 			}
 
