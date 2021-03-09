@@ -469,13 +469,13 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 		: ShaderCompiler(allocator)
 	{}
 
-	static void set(ShaderType type, const void* data, u64 size, Ref<Program> program) {
+	static void set(ShaderType type, const void* data, u64 size, Program& program) {
 		OutputMemoryStream* str;
 		switch(type) {
-			case ShaderType::COMPUTE: str = &program->cs; break;
-			case ShaderType::VERTEX: str = &program->vs; break;
-			case ShaderType::FRAGMENT: str = &program->ps; break;
-			case ShaderType::GEOMETRY: str = &program->gs; break;
+			case ShaderType::COMPUTE: str = &program.cs; break;
+			case ShaderType::VERTEX: str = &program.vs; break;
+			case ShaderType::FRAGMENT: str = &program.ps; break;
+			case ShaderType::GEOMETRY: str = &program.gs; break;
 			default: ASSERT(false); return;
 		}
 		str->resize(size);
@@ -485,27 +485,27 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 	bool compile(const VertexDecl& decl
 		, const Input& input
 		, const char* name
-		, Ref<Program> program)
+		, Program& program)
 	{
-		program->used_srvs_flags = 0;
-		program->attribute_count = decl.attributes_count;
+		program.used_srvs_flags = 0;
+		program.attribute_count = decl.attributes_count;
 		for (u8 i = 0; i < decl.attributes_count; ++i) {
 			const Attribute& attr = decl.attributes[i];
 			const bool instanced = attr.flags & Attribute::INSTANCED;
-			program->attributes[i].AlignedByteOffset = attr.byte_offset;
-			program->attributes[i].Format = getDXGIFormat(attr);
-			program->attributes[i].SemanticIndex = attr.idx;
-			program->attributes[i].SemanticName = "TEXCOORD";
-			program->attributes[i].InputSlot = instanced ? 1 : 0;
-			program->attributes[i].InputSlotClass = instanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-			program->attributes[i].InstanceDataStepRate = instanced ? 1 : 0;
+			program.attributes[i].AlignedByteOffset = attr.byte_offset;
+			program.attributes[i].Format = getDXGIFormat(attr);
+			program.attributes[i].SemanticIndex = attr.idx;
+			program.attributes[i].SemanticName = "TEXCOORD";
+			program.attributes[i].InputSlot = instanced ? 1 : 0;
+			program.attributes[i].InputSlotClass = instanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+			program.attributes[i].InstanceDataStepRate = instanced ? 1 : 0;
 		}
 
-		auto compile_stage = [&](ShaderType type, Ref<OutputMemoryStream> out) -> bool {
+		auto compile_stage = [&](ShaderType type, OutputMemoryStream& out) -> bool {
 			const char* tmp[128];
 			const u32 c = filter(input, type, tmp);
 			if (c == 0) {
-				out->clear();
+				out.clear();
 				return true;
 			}
 			if (c > (u32)input.prefixes.length() + decl.attributes_count) {
@@ -513,16 +513,16 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 				auto iter = m_cache.find(hash);
 				if (iter.isValid()) {
 					set(type, iter.value().data.data(), iter.value().data.size(), program);
-					program->readonly_binding_flags = iter.value().readonly_bitset;
-					program->used_srvs_flags = iter.value().used_srvs_bitset;
+					program.readonly_binding_flags = iter.value().readonly_bitset;
+					program.used_srvs_flags = iter.value().used_srvs_bitset;
 					return true;
 				}
 
 				std::string hlsl;
-				if (!glsl2hlsl(tmp, c, type, name, Ref(hlsl), Ref(program->readonly_binding_flags), Ref(program->used_srvs_flags))) {
+				if (!glsl2hlsl(tmp, c, type, name, hlsl, program.readonly_binding_flags, program.used_srvs_flags)) {
 					return false;
 				}
-				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name, program->readonly_binding_flags, program->used_srvs_flags);
+				ID3DBlob* blob = ShaderCompiler::compile(hash, hlsl.c_str(), type, name, program.readonly_binding_flags, program.used_srvs_flags);
 				if (!blob) return false;
 				set(type, blob->GetBufferPointer(), blob->GetBufferSize(), program);
 				blob->Release();
@@ -531,10 +531,10 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 			return false;
 		};
 
-		bool compiled = compile_stage(ShaderType::VERTEX, Ref(program->vs));
-		compiled = compiled && compile_stage(ShaderType::FRAGMENT, Ref(program->ps));
-		compiled = compiled && compile_stage(ShaderType::COMPUTE, Ref(program->cs));
-		compiled = compiled && compile_stage(ShaderType::GEOMETRY, Ref(program->gs));
+		bool compiled = compile_stage(ShaderType::VERTEX, program.vs);
+		compiled = compiled && compile_stage(ShaderType::FRAGMENT, program.ps);
+		compiled = compiled && compile_stage(ShaderType::COMPUTE, program.cs);
+		compiled = compiled && compile_stage(ShaderType::GEOMETRY, program.gs);
 		return compiled;
 	}
 };
@@ -1371,11 +1371,11 @@ ID3D12RootSignature* createRootSignature() {
 	return res;
 }
 
-static bool createSwapchain(HWND hwnd, Ref<D3D::Window> window) {
+static bool createSwapchain(HWND hwnd, D3D::Window& window) {
 	DXGI_SWAP_CHAIN_DESC1 sd = {};
 	sd.BufferCount = NUM_BACKBUFFERS;
-	sd.Width = window->size.x;
-	sd.Height = window->size.y;
+	sd.Width = window.size.x;
+	sd.Height = window.size.y;
 	sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 	sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -1391,21 +1391,21 @@ static bool createSwapchain(HWND hwnd, Ref<D3D::Window> window) {
 
 	if (CreateDXGIFactory1(IID_PPV_ARGS(&dxgi_factory)) != S_OK) return false;
 	if (dxgi_factory->CreateSwapChainForHwnd(d3d->cmd_queue, (HWND)hwnd, &sd, NULL, NULL, &swapChain1) != S_OK) return false;
-	if (swapChain1->QueryInterface(IID_PPV_ARGS(&window->swapchain)) != S_OK) return false;
+	if (swapChain1->QueryInterface(IID_PPV_ARGS(&window.swapchain)) != S_OK) return false;
 
 	swapChain1->Release();
 	dxgi_factory->Release();
-	window->swapchain->SetMaximumFrameLatency(NUM_BACKBUFFERS);
+	window.swapchain->SetMaximumFrameLatency(NUM_BACKBUFFERS);
 
 	for (u32 i = 0; i < NUM_BACKBUFFERS; ++i) {
 		ID3D12Resource* backbuffer;
-		if (window->swapchain->GetBuffer(i, IID_PPV_ARGS(&backbuffer)) != S_OK) return false;
+		if (window.swapchain->GetBuffer(i, IID_PPV_ARGS(&backbuffer)) != S_OK) return false;
 		backbuffer->SetName(L"window_rb");
-		window->backbuffers[i] = backbuffer;
+		window.backbuffers[i] = backbuffer;
 	}
 
-	const UINT current_bb_idx = window->swapchain->GetCurrentBackBufferIndex();
-	switchState(d3d->cmd_list, window->backbuffers[current_bb_idx], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	const UINT current_bb_idx = window.swapchain->GetCurrentBackBufferIndex();
+	switchState(d3d->cmd_list, window.backbuffers[current_bb_idx], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	return true;
 }
 
@@ -1515,7 +1515,7 @@ bool init(void* hwnd, InitFlags flags) {
 	ID3D12DescriptorHeap* heaps[] = {d3d->srv_heap.heap, d3d->sampler_heap.heap};
 	d3d->cmd_list->SetDescriptorHeaps(lengthOf(heaps), heaps);
 
-	if (!createSwapchain((HWND)hwnd, Ref(d3d->windows[0]))) return false;
+	if (!createSwapchain((HWND)hwnd, d3d->windows[0])) return false;
 
 	for (SRV& h : d3d->current_srvs) {
 		h.texture = INVALID_TEXTURE;
@@ -1668,7 +1668,7 @@ void unmap(BufferHandle buffer) {
 	buffer->mapped_ptr = nullptr;
 }
 
-bool getMemoryStats(Ref<MemoryStats> stats) {
+bool getMemoryStats(MemoryStats& stats) {
 	return false;
 }
 
@@ -1696,7 +1696,7 @@ void setCurrentWindow(void* window_handle) {
 		GetClientRect((HWND)window_handle, &rect);
 		window.size = IVec2(rect.right - rect.left, rect.bottom - rect.top);
 
-		createSwapchain((HWND)window_handle, Ref(window));
+		createSwapchain((HWND)window_handle, window);
 		return;
 	}
 
@@ -2689,7 +2689,7 @@ bool createProgram(ProgramHandle program
 		program->name = name;
 	#endif
 	ShaderCompiler::Input args { decl, Span(srcs, num), Span(types, num), Span(prefixes, prefixes_count) };
-	return d3d->shader_compiler.compile(decl, args, name, Ref(*program));
+	return d3d->shader_compiler.compile(decl, args, name, *program);
 }
 
 } // namespace gpu
