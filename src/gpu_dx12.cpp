@@ -1600,7 +1600,7 @@ void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle depth_ste
 	}
 
 	const bool readonly_ds = u32(flags & FramebufferFlags::READONLY_DEPTH_STENCIL);
-	if (!attachments && !depth_stencil) {
+	if (num == 0 && !depth_stencil) {
 		d3d->current_framebuffer.count = 1;
 		d3d->current_framebuffer.formats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 		d3d->current_framebuffer.render_targets[0] = allocRTV(d3d->rtv_heap, d3d->current_window->backbuffers[d3d->current_window->swapchain->GetCurrentBackBufferIndex()]);

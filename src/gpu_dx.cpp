@@ -941,7 +941,7 @@ void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, Frame
 	checkThread();
 
 	const bool readonly_ds = u32(flags & FramebufferFlags::READONLY_DEPTH_STENCIL);
-	if (!attachments && !ds) {
+	if (num == 0 && !ds) {
 		d3d->current_framebuffer = d3d->current_window->framebuffer;
 		d3d->device_ctx->OMSetRenderTargets(d3d->current_framebuffer.count, d3d->current_framebuffer.render_targets, d3d->current_framebuffer.depth_stencil);
 		return;
