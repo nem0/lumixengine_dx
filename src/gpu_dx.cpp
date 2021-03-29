@@ -552,11 +552,6 @@ void destroy(QueryHandle query) {
 	LUMIX_DELETE(d3d->allocator, query);
 }
 
-void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
-	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	d3d->device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
-}
-
 void createTextureView(TextureHandle view, TextureHandle texture) {
 	ASSERT(view);
 	ASSERT(texture);
@@ -1970,6 +1965,19 @@ void drawTriangles(u32 bytes_offset, u32 indices_count, DataType index_type) {
 	d3d->device_ctx->IASetIndexBuffer(b, dxgi_index_type, bytes_offset);
 	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	d3d->device_ctx->DrawIndexed(indices_count, 0, 0);
+}
+
+void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_count) {
+	D3D11_PRIMITIVE_TOPOLOGY topology;
+	switch(type) {
+		case PrimitiveType::LINES: topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
+		case PrimitiveType::POINTS: topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
+		case PrimitiveType::TRIANGLES: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
+		case PrimitiveType::TRIANGLE_STRIP: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
+		default: ASSERT(false); return;
+	}
+	d3d->device_ctx->IASetPrimitiveTopology(topology);
+	d3d->device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
 void drawArrays(PrimitiveType type, u32 offset, u32 count)

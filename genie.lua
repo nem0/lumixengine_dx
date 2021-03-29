@@ -36,6 +36,8 @@ if _OPTIONS["nodx"] == nil then
 		project "studio"
 			libdirs { "external/lib/win64" .. "_" .. binary_api_dir .. "/release"}
 			libdirs { "external/pix/bin/x64" }
+	end
+	if build_app then
 		project "app"
 			libdirs { "external/lib/win64" .. "_" .. binary_api_dir .. "/release"}
 			libdirs { "external/pix/bin/x64" }

@@ -827,7 +827,7 @@ struct D3D {
 	BufferHandle current_indirect_buffer = INVALID_BUFFER;
 	BufferHandle current_index_buffer = INVALID_BUFFER;
 	ProgramHandle current_program = INVALID_PROGRAM;
-	SRV current_srvs[12];
+	SRV current_srvs[16];
 	TextureFlags current_sampler_flags[10] = {};
 	bool dirty_samplers = true;
 	StateFlags current_state = StateFlags::NONE;
@@ -881,7 +881,7 @@ void Frame::clear() {
 
 
 LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAllocator& heap, const SRV* srvs, u32 count) {
-	u16 flags[12];
+	u16 flags[16];
 	ASSERT(count <= lengthOf(flags));
 	for (u32 i = 0; i < count; ++i) {
 		if (srvs[i].texture) {
@@ -2357,6 +2357,44 @@ void drawTriangles(u32 offset_bytes, u32 indices_count, DataType index_type) {
 	drawTrianglesInstancedInternal(offset_bytes, indices_count, 1, index_type);
 }
 
+void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_count) {
+	ASSERT(d3d->current_program);
+	D3D12_PRIMITIVE_TOPOLOGY pt;
+	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt;
+	switch (type) {
+		case PrimitiveType::TRIANGLES:
+			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			break;
+		case PrimitiveType::TRIANGLE_STRIP:
+			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			break;
+		case PrimitiveType::LINES:
+			pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+			break;
+		case PrimitiveType::POINTS:
+			pt = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+			break;
+		default: ASSERT(0); break;
+	}
+	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt));
+	d3d->cmd_list->IASetPrimitiveTopology(pt);
+
+	if (d3d->dirty_samplers) {
+		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
+		d3d->cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d->dirty_samplers = false;
+	}
+	
+	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
+	d3d->cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+
+	d3d->cmd_list->DrawInstanced(indices_count, instances_count, 0, 0);
+}
+
 void drawArrays(PrimitiveType type, u32 offset, u32 count) {
 	ASSERT(d3d->current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt;
@@ -2568,25 +2606,6 @@ void drawIndirect(DataType index_type) {
 	}();
 
 	d3d->cmd_list->ExecuteIndirect(signature, 1, d3d->current_indirect_buffer->resource, 0, nullptr, 0);
-}
-
-void drawTriangleStripArraysInstanced(u32 indices_count, u32 instances_count) {
-	ASSERT(d3d->current_program);
-	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt));
-	d3d->cmd_list->IASetPrimitiveTopology(pt);
-
-	if (d3d->dirty_samplers) {
-		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-		d3d->cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
-		d3d->dirty_samplers = false;
-	}
-	
-	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-	d3d->cmd_list->SetGraphicsRootDescriptorTable(6, srv);
-
-	d3d->cmd_list->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
 void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
