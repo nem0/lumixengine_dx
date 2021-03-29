@@ -10,7 +10,6 @@ newoption {
 
 if _OPTIONS["nodx"] == nil then
 	project "renderer"
-
 		files { 
 			"src/**.c",
 			"src/**.cpp",
@@ -35,6 +34,9 @@ if _OPTIONS["nodx"] == nil then
 
 	if build_studio then
 		project "studio"
+			libdirs { "external/lib/win64" .. "_" .. binary_api_dir .. "/release"}
+			libdirs { "external/pix/bin/x64" }
+		project "app"
 			libdirs { "external/lib/win64" .. "_" .. binary_api_dir .. "/release"}
 			libdirs { "external/pix/bin/x64" }
 	end
