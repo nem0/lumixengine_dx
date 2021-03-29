@@ -1371,12 +1371,13 @@ ID3D12RootSignature* createRootSignature() {
 	return res;
 }
 
+// TODO nonsrgb window swapchain views
 static bool createSwapchain(HWND hwnd, D3D::Window& window) {
 	DXGI_SWAP_CHAIN_DESC1 sd = {};
 	sd.BufferCount = NUM_BACKBUFFERS;
 	sd.Width = window.size.x;
 	sd.Height = window.size.y;
-	sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 	sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 	sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 	sd.SampleDesc.Count = 1;

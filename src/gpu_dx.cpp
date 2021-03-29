@@ -321,7 +321,7 @@ struct D3D {
 
 	struct FrameBuffer {
 		ID3D11DepthStencilView* depth_stencil = nullptr;
-		ID3D11RenderTargetView* render_targets[16];
+		ID3D11RenderTargetView* render_targets[16] = {};
 		u32 count = 0;
 	};
 
@@ -329,6 +329,7 @@ struct D3D {
 		void* handle = nullptr;
 		IDXGISwapChain* swapchain = nullptr;
 		FrameBuffer framebuffer;
+		FrameBuffer framebuffer_srgb;
 		IVec2 size = IVec2(800, 600);
 	};
 	
@@ -703,6 +704,7 @@ void shutdown() {
 		}
 		for (u32 i = 0; i < w.framebuffer.count; ++i) {
 			w.framebuffer.render_targets[i]->Release();
+			w.framebuffer_srgb.render_targets[i]->Release();
 		}
 		w.framebuffer.count = 0;
 		w.swapchain->Release();
@@ -767,7 +769,7 @@ bool init(void* hwnd, InitFlags flags) {
 	DXGI_SWAP_CHAIN_DESC desc = {};
 	desc.BufferDesc.Width = width;
 	desc.BufferDesc.Height = height;
-	desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 	desc.BufferDesc.RefreshRate.Numerator = 60;
 	desc.BufferDesc.RefreshRate.Denominator = 1;
 	desc.OutputWindow = (HWND)hwnd;
@@ -803,10 +805,22 @@ bool init(void* hwnd, InitFlags flags) {
 	hr = d3d->windows[0].swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
 	if(!SUCCEEDED(hr)) return false;
 
-	hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &d3d->windows[0].framebuffer.render_targets[0]);
+	D3D11_RENDER_TARGET_VIEW_DESC rt_desc = {};
+	rt_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	rt_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+	rt_desc.Texture2D.MipSlice = 0;
+	hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, &rt_desc, &d3d->windows[0].framebuffer.render_targets[0]);
+
+	D3D11_RENDER_TARGET_VIEW_DESC rt_desc_srgb = {};
+	rt_desc_srgb.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	rt_desc_srgb.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+	rt_desc_srgb.Texture2D.MipSlice = 0;
+	hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, &rt_desc_srgb, &d3d->windows[0].framebuffer_srgb.render_targets[0]);
+
 	rt->Release();
 	if(!SUCCEEDED(hr)) return false;
 	d3d->windows[0].framebuffer.count = 1;
+	d3d->windows[0].framebuffer_srgb.count = 1;
 	
 	D3D11_TEXTURE2D_DESC ds_desc;
 	memset(&ds_desc, 0, sizeof(ds_desc));
@@ -832,6 +846,7 @@ bool init(void* hwnd, InitFlags flags) {
 
 	hr = d3d->device->CreateDepthStencilView((ID3D11Resource*)ds, &dsv_desc, &d3d->windows[0].framebuffer.depth_stencil);
 	if(!SUCCEEDED(hr)) return false;
+	d3d->windows[0].framebuffer_srgb.depth_stencil = d3d->windows[0].framebuffer.depth_stencil;
 	ds->Release();
 
 	d3d->current_framebuffer = d3d->windows[0].framebuffer;
@@ -942,7 +957,12 @@ void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, Frame
 
 	const bool readonly_ds = u32(flags & FramebufferFlags::READONLY_DEPTH_STENCIL);
 	if (num == 0 && !ds) {
-		d3d->current_framebuffer = d3d->current_window->framebuffer;
+		if (u32(flags & FramebufferFlags::SRGB)) {
+			d3d->current_framebuffer = d3d->current_window->framebuffer_srgb;
+		}
+		else {
+			d3d->current_framebuffer = d3d->current_window->framebuffer;
+		}
 		d3d->device_ctx->OMSetRenderTargets(d3d->current_framebuffer.count, d3d->current_framebuffer.render_targets, d3d->current_framebuffer.depth_stencil);
 		return;
 	}
@@ -1065,6 +1085,8 @@ void setCurrentWindow(void* window_handle)
 	for (auto& window : d3d->windows) {
 		if (window.handle) continue;
 
+		window.framebuffer = {};
+		window.framebuffer_srgb = {};
 		window.handle = window_handle;
 		d3d->current_window = &window;
 		RECT rect;
@@ -1085,7 +1107,7 @@ void setCurrentWindow(void* window_handle)
 		DXGI_SWAP_CHAIN_DESC desc = {};
 		desc.BufferDesc.Width = width;
 		desc.BufferDesc.Height = height;
-		desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 		desc.BufferDesc.RefreshRate.Numerator = 60;
 		desc.BufferDesc.RefreshRate.Denominator = 1;
 		desc.OutputWindow = (HWND)window_handle;
@@ -1110,7 +1132,19 @@ void setCurrentWindow(void* window_handle)
 			return;
 		}
 
-		hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &window.framebuffer.render_targets[0]);
+
+		D3D11_RENDER_TARGET_VIEW_DESC rt_desc = {};
+		rt_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		rt_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+		rt_desc.Texture2D.MipSlice = 0;
+		hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, &rt_desc, &window.framebuffer.render_targets[0]);
+
+		D3D11_RENDER_TARGET_VIEW_DESC rt_desc_srgb = {};
+		rt_desc_srgb.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		rt_desc_srgb.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+		rt_desc_srgb.Texture2D.MipSlice = 0;
+
+		hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, &rt_desc_srgb, &window.framebuffer_srgb.render_targets[0]);
 		rt->Release();
 		if(!SUCCEEDED(hr)) {
 			logError("Failed to create RTV");
@@ -1118,6 +1152,7 @@ void setCurrentWindow(void* window_handle)
 		}
 
 		window.framebuffer.count = 1;
+		window.framebuffer_srgb.count = 1;
 	
 		d3d->current_framebuffer = window.framebuffer;
 		factory->Release();
@@ -1162,6 +1197,7 @@ u32 swapBuffers()
 				window.framebuffer.depth_stencil = nullptr;
 			}
 			window.framebuffer.render_targets[0]->Release();
+			window.framebuffer_srgb.render_targets[0]->Release();
 
 			ID3D11Texture2D* rt;
 			d3d->device_ctx->OMSetRenderTargets(0, nullptr, 0);
@@ -1170,7 +1206,17 @@ u32 swapBuffers()
 			HRESULT hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
 			ASSERT(SUCCEEDED(hr));
 
-			hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, NULL, &window.framebuffer.render_targets[0]);
+			D3D11_RENDER_TARGET_VIEW_DESC rt_desc = {};
+			rt_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			rt_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+			rt_desc.Texture2D.MipSlice = 0;
+			hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, &rt_desc, &window.framebuffer.render_targets[0]);
+
+			D3D11_RENDER_TARGET_VIEW_DESC rt_desc_srgb = {};
+			rt_desc_srgb.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			rt_desc_srgb.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+			rt_desc_srgb.Texture2D.MipSlice = 0;
+			hr = d3d->device->CreateRenderTargetView((ID3D11Resource*)rt, &rt_desc_srgb, &window.framebuffer_srgb.render_targets[0]);
 			rt->Release();
 			ASSERT(SUCCEEDED(hr));
 			window.framebuffer.count = 1;
@@ -1202,6 +1248,7 @@ u32 swapBuffers()
 
 				hr = d3d->device->CreateDepthStencilView((ID3D11Resource*)ds, &dsv_desc, &window.framebuffer.depth_stencil);
 				ASSERT(SUCCEEDED(hr));
+				window.framebuffer_srgb.depth_stencil = window.framebuffer.depth_stencil;
 				ds->Release();
 			}
 		}
