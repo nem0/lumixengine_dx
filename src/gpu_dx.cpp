@@ -92,6 +92,8 @@ static u32 getSize(DXGI_FORMAT format) {
 		case DXGI_FORMAT_R24G8_TYPELESS: return 4;
 		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 4;
 		case DXGI_FORMAT_R8G8B8A8_UNORM: return 4;
+		case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return 4;
+		case DXGI_FORMAT_B8G8R8A8_UNORM: return 4;
 		case DXGI_FORMAT_R16G16B16A16_UNORM: return 8;
 		case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
 		case DXGI_FORMAT_R32G32_FLOAT: return 8;
@@ -100,9 +102,8 @@ static u32 getSize(DXGI_FORMAT format) {
 		case DXGI_FORMAT_R16_UNORM: return 2;
 		case DXGI_FORMAT_R16_FLOAT: return 2;
 		case DXGI_FORMAT_R32_FLOAT: return 4;
+		default: ASSERT(false); return 0;
 	}
-	ASSERT(false);
-	return 0;
 }
 
 int getSize(AttributeType type) {
@@ -390,48 +391,44 @@ static u32 sizeDXTC(u32 w, u32 h, DXGI_FORMAT format) {
 
 struct LoadInfo {
 	bool compressed;
-	bool swap;
 	bool palette;
-	u32 blockBytes;
-	u32 block_width;
-	u32 block_height;
 	DXGI_FORMAT format;
 	DXGI_FORMAT srgb_format;
 };
 
 static LoadInfo loadInfoDXT1 = {
-	true, false, false, 8, 4, 4, DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_UNORM_SRGB
+	true, false, DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_UNORM_SRGB
 };
 static LoadInfo loadInfoDXT3 = {
-	true, false, false, 16, 4, 4, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC2_UNORM_SRGB
+	true, false, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC2_UNORM_SRGB
 };
 static LoadInfo loadInfoDXT5 = {
-	true, false, false, 16, 4, 4, DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC3_UNORM_SRGB
+	true, false, DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC3_UNORM_SRGB
 };
 static LoadInfo loadInfoATI1 = {
-	true, false, false, 8, 4, 4, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_UNKNOWN
+	true, false, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_UNKNOWN
 };
 static LoadInfo loadInfoATI2 = {
-	true, false, false, 16, 4, 4, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_UNKNOWN
+	true, false, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_UNKNOWN
 };
 static LoadInfo loadInfoBGRA8 = {
-//	false, false, false, 4, GL_RGBA8, GL_SRGB8_ALPHA8, GL_BGRA, GL_UNSIGNED_BYTE
+	false, false, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
 };
 static LoadInfo loadInfoRGBA8 = {
-//	false, false, false, 4, GL_RGBA8, GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE
+	false, false, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
 };
-static LoadInfo loadInfoBGR8 = {
-//	false, false, false, 3, GL_RGB8, GL_SRGB8, GL_BGR, GL_UNSIGNED_BYTE
+/*static LoadInfo loadInfoBGR8 = {
+	false, false, false, 0, 0, 0, DXGI_FORMAT_B8G8R8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
 };
 static LoadInfo loadInfoBGR5A1 = {
-//	false, true, false, 2, GL_RGB5_A1, GL_ZERO, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV
+	false, true, false, DXGI_FORMAT_B5G5R5A1_UNORM, DXGI_FORMAT_UNKNOWN
 };
 static LoadInfo loadInfoBGR565 = {
-//	false, true, false, 2, GL_RGB5, GL_ZERO, GL_RGB, GL_UNSIGNED_SHORT_5_6_5
+	false, true, false, DXGI_FORMAT_B5G6R5_UNORM, DXGI_FORMAT_UNKNOWN
 };
 static LoadInfo loadInfoIndex8 = {
-//	false, false, true, 1, GL_RGB8, GL_SRGB8, GL_BGRA, GL_UNSIGNED_BYTE
-};
+	false, false, true, 1, GL_RGB8, GL_SRGB8, GL_BGRA, GL_UNSIGNED_BYTE
+};*/
 
 static LoadInfo* getDXT10LoadInfo(const Header& hdr, const DXT10Header& dxt10_hdr)
 {
@@ -439,26 +436,23 @@ static LoadInfo* getDXT10LoadInfo(const Header& hdr, const DXT10Header& dxt10_hd
 		case DxgiFormat::B8G8R8A8_UNORM_SRGB:
 		case DxgiFormat::B8G8R8A8_UNORM:
 			return &loadInfoBGRA8;
-			break;
+		case DxgiFormat::R8G8B8A8_UNORM_SRGB:
 		case DxgiFormat::R8G8B8A8_UNORM:
 			return &loadInfoRGBA8;
-			break;
 		case DxgiFormat::BC1_UNORM_SRGB:
 		case DxgiFormat::BC1_UNORM:
 			return &loadInfoDXT1;
-			break;
 		case DxgiFormat::BC2_UNORM_SRGB:
 		case DxgiFormat::BC2_UNORM:
 			return &loadInfoDXT3;
-			break;
 		case DxgiFormat::BC3_UNORM_SRGB:
 		case DxgiFormat::BC3_UNORM:
 			return &loadInfoDXT5;
-			break;
+		case DxgiFormat::BC4_UNORM: return &loadInfoATI1;
+		case DxgiFormat::BC5_UNORM: return &loadInfoATI2;
 		default:
 			ASSERT(false);
 			return nullptr;
-			break;
 	}
 }
 
@@ -1413,7 +1407,7 @@ bool loadLayers(TextureHandle handle, u32 layer_offset, const void* data, int si
 	else if (isBGRA8(hdr.pixelFormat)) {
 		li = &DDS::loadInfoBGRA8;
 	}
-	else if (isBGR8(hdr.pixelFormat)) {
+	/*else if (isBGR8(hdr.pixelFormat)) {
 		li = &DDS::loadInfoBGR8;
 	}
 	else if (isBGR5A1(hdr.pixelFormat)) {
@@ -1424,11 +1418,12 @@ bool loadLayers(TextureHandle handle, u32 layer_offset, const void* data, int si
 	}
 	else if (isINDEX8(hdr.pixelFormat)) {
 		li = &DDS::loadInfoIndex8;
-	}
+	}*/
 	else if (isDXT10(hdr.pixelFormat)) {
 		DDS::DXT10Header dxt10_hdr;
 		blob.read(dxt10_hdr);
 		li = DDS::getDXT10LoadInfo(hdr, dxt10_hdr);
+		if (!li) return false;
 		layers = dxt10_hdr.array_size;
 	}
 	else {
@@ -1469,9 +1464,31 @@ bool loadLayers(TextureHandle handle, u32 layer_offset, const void* data, int si
 					d3d->device_ctx->UpdateSubresource(texture.texture2D, subres, &box, mem, row_pitch, depth_pitch);
 				}
 			}
-			else {
+			else if (li->palette) {
 				// TODO
 				ASSERT(false);
+			}
+			else {
+				const u32 bytes_per_px = getSize(internal_format);
+				for (u32 mip = 0; mip < mip_count; ++mip) {
+					const u32 width = maximum(1, hdr.dwWidth >> mip);
+					const u32 height = maximum(1, hdr.dwHeight >> mip);
+
+					const UINT subres = D3D11CalcSubresource(mip, layer * (is_cubemap ? 6 : 1) + side, mip_count);
+					u32 row_pitch = width * bytes_per_px;
+					u32 depth_pitch = width * height * bytes_per_px;
+					const void* mem = blob.skip(size);
+
+					D3D11_BOX box;
+					box.left = 0;
+					box.top = 0;
+					box.right =  width;
+					box.bottom = height;
+					box.front = 0;
+					box.back = 1;
+	
+					d3d->device_ctx->UpdateSubresource(texture.texture2D, subres, &box, mem, row_pitch, depth_pitch);
+				}
 			}
 		}
 	}
@@ -1516,7 +1533,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags 
 	else if (isBGRA8(hdr.pixelFormat)) {
 		li = &DDS::loadInfoBGRA8;
 	}
-	else if (isBGR8(hdr.pixelFormat)) {
+	/*else if (isBGR8(hdr.pixelFormat)) {
+		ASSERT(false);
 		li = &DDS::loadInfoBGR8;
 	}
 	else if (isBGR5A1(hdr.pixelFormat)) {
@@ -1527,11 +1545,12 @@ bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags 
 	}
 	else if (isINDEX8(hdr.pixelFormat)) {
 		li = &DDS::loadInfoIndex8;
-	}
+	}*/
 	else if (isDXT10(hdr.pixelFormat)) {
 		DDS::DXT10Header dxt10_hdr;
 		blob.read(dxt10_hdr);
 		li = DDS::getDXT10LoadInfo(hdr, dxt10_hdr);
+		if (!li) return false;
 		layers = dxt10_hdr.array_size;
 	}
 	else {
@@ -1555,28 +1574,35 @@ bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags 
 	u32 srd_idx = 0;
 	for(int side = 0; side < (is_cubemap ? 6 : 1); ++side) {
 		for (int layer = 0; layer < layers; ++layer) {
-			//const GLenum tex_img_target =  is_cubemap ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + side : layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
-
 			if (li->compressed) {
-				/*if (size != hdr.dwPitchOrLinearSize || (hdr.dwFlags & DDS::DDSD_LINEARSIZE) == 0) {
-					CHECK_GL(glDeleteTextures(1, &texture));
-					return false;
-				}*/
+				ASSERT(hdr.dwWidth % 4 == 0);
+				ASSERT(hdr.dwHeight % 4 == 0);
 				for (u32 mip = 0; mip < mip_count; ++mip) {
 					const u32 width = maximum(1, hdr.dwWidth >> mip);
 					const u32 height = maximum(1, hdr.dwHeight >> mip);
 					const u32 size = DDS::sizeDXTC(width, height, internal_format);
-					srd[srd_idx].pSysMem = (u8*)blob.getData() + blob.getPosition();
+					srd[srd_idx].pSysMem = (const u8*)blob.getData() + blob.getPosition();
 					srd[srd_idx].SysMemPitch = ((width + 3) / 4) * DDS::sizeDXTC(1, 1, internal_format);
 					srd[srd_idx].SysMemSlicePitch = ((height + 3) / 4) * srd[srd_idx].SysMemPitch;
-					blob.skip(size);
-					ASSERT(size == srd[srd_idx].SysMemSlicePitch);
+					blob.skip(srd[srd_idx].SysMemSlicePitch);
 					++srd_idx;
 				}
 			}
-			else {
+			else if (li->palette) {
 				// TODO
 				ASSERT(false);
+			}
+			else {
+				const u32 bytes_per_px = getSize(internal_format);
+				for (u32 mip = 0; mip < mip_count; ++mip) {
+					const u32 width = maximum(1, hdr.dwWidth >> mip);
+					const u32 height = maximum(1, hdr.dwHeight >> mip);
+					srd[srd_idx].pSysMem = (const u8*)blob.getData() + blob.getPosition();
+					srd[srd_idx].SysMemPitch = width * bytes_per_px;
+					srd[srd_idx].SysMemSlicePitch = height * width * bytes_per_px;
+					blob.skip(srd[srd_idx].SysMemSlicePitch);
+					++srd_idx;
+				}
 			}
 		}
 	}
@@ -1584,8 +1610,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags 
 	if (is_cubemap) {
 		D3D11_TEXTURE2D_DESC desc = {};
 
-		desc.Width = maximum(li->block_width, hdr.dwWidth);
-		desc.Height = maximum(li->block_width, hdr.dwHeight);
+		desc.Width = hdr.dwWidth;
+		desc.Height = hdr.dwHeight;
 		desc.ArraySize = 6;
 		desc.MipLevels = mip_count;
 		desc.CPUAccessFlags = 0;
@@ -1609,8 +1635,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags 
 	} else if (layers > 1) {
 		D3D11_TEXTURE2D_DESC desc = {};
 
-		desc.Width = maximum(li->block_width, hdr.dwWidth);
-		desc.Height = maximum(li->block_width, hdr.dwHeight);
+		desc.Width = hdr.dwWidth;
+		desc.Height = hdr.dwHeight;
 		desc.ArraySize = layers;
 		desc.MipLevels = mip_count;
 		desc.CPUAccessFlags = 0;
@@ -1634,8 +1660,8 @@ bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags 
 		ASSERT(SUCCEEDED(hr));
 	} else {
 		D3D11_TEXTURE2D_DESC desc = {};
-		desc.Width = maximum(li->block_width, hdr.dwWidth);
-		desc.Height = maximum(li->block_width, hdr.dwHeight);
+		desc.Width = hdr.dwWidth;
+		desc.Height = hdr.dwHeight;
 		desc.ArraySize = layers;
 		desc.MipLevels = mip_count;
 		desc.CPUAccessFlags = 0;
