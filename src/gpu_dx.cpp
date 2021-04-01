@@ -11,6 +11,7 @@
 #include "engine/sync.h"
 #include "engine/stream.h"
 #include "engine/string.h"
+#include "gpu_dxgi.h"
 #include "shader_compiler.h"
 #include <Windows.h>
 #include <d3d11_1.h>
@@ -50,62 +51,6 @@ static void toWChar(WCHAR (&out)[N], const char* in)
 	*cout = 0;
 }
 
-static DXGI_FORMAT getDXGIFormat(const Attribute& attr, bool as_int) {
-	switch (attr.type) {
-		case AttributeType::FLOAT: 
-			switch(attr.components_count) {
-				case 1: return DXGI_FORMAT_R32_FLOAT;
-				case 2: return DXGI_FORMAT_R32G32_FLOAT;
-				case 3: return DXGI_FORMAT_R32G32B32_FLOAT;
-				case 4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
-			}
-			break;
-		case AttributeType::I8: 
-			switch(attr.components_count) {
-				case 1: return as_int ? DXGI_FORMAT_R8_SINT : DXGI_FORMAT_R8_SNORM;
-				case 2: return as_int ? DXGI_FORMAT_R8G8_SINT : DXGI_FORMAT_R8G8_SNORM;
-				case 4: return as_int ? DXGI_FORMAT_R8G8B8A8_SINT : DXGI_FORMAT_R8G8B8A8_SNORM;
-			}
-			break;
-		case AttributeType::U8: 
-			switch(attr.components_count) {
-				case 1: return as_int ? DXGI_FORMAT_R8_UINT : DXGI_FORMAT_R8_UNORM;
-				case 2: return as_int ? DXGI_FORMAT_R8G8_UINT : DXGI_FORMAT_R8G8_UNORM;
-				case 4: return as_int ? DXGI_FORMAT_R8G8B8A8_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
-			}
-			break;
-		case AttributeType::I16: 
-			switch(attr.components_count) {
-				case 4: return as_int ? DXGI_FORMAT_R16G16B16A16_SINT : DXGI_FORMAT_R16G16B16A16_SNORM;
-			}
-			break;
-	}
-	ASSERT(false);
-	return DXGI_FORMAT_R32_FLOAT;
-}
-
-static u32 getSize(DXGI_FORMAT format) {
-	switch(format) {
-		case DXGI_FORMAT_R8_UNORM: return 1;
-		case DXGI_FORMAT_R8G8_UNORM: return 2;
-		case DXGI_FORMAT_R32_TYPELESS: return 4;
-		case DXGI_FORMAT_R24G8_TYPELESS: return 4;
-		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 4;
-		case DXGI_FORMAT_R8G8B8A8_UNORM: return 4;
-		case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return 4;
-		case DXGI_FORMAT_B8G8R8A8_UNORM: return 4;
-		case DXGI_FORMAT_R16G16B16A16_UNORM: return 8;
-		case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
-		case DXGI_FORMAT_R32G32_FLOAT: return 8;
-		case DXGI_FORMAT_R32G32B32_FLOAT: return 12;
-		case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16;
-		case DXGI_FORMAT_R16_UNORM: return 2;
-		case DXGI_FORMAT_R16_FLOAT: return 2;
-		case DXGI_FORMAT_R32_FLOAT: return 4;
-		default: ASSERT(false); return 0;
-	}
-}
-
 int getSize(AttributeType type) {
 	switch(type) {
 		case AttributeType::FLOAT: return 4;
@@ -115,31 +60,6 @@ int getSize(AttributeType type) {
 		default: ASSERT(false); return 0;
 	}
 }
-
-static DXGI_FORMAT getDXGIFormat(TextureFormat format) {
-	switch (format) {
-		case TextureFormat::R8: return DXGI_FORMAT_R8_UNORM;
-		case TextureFormat::RG8: return DXGI_FORMAT_R8G8_UNORM;
-		case TextureFormat::D32: return DXGI_FORMAT_R32_TYPELESS;
-		case TextureFormat::D24S8: return DXGI_FORMAT_R24G8_TYPELESS;
-		//case TextureFormat::SRGB: return DXGI_FORMAT_R32_FLOAT;
-		case TextureFormat::SRGBA: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-		case TextureFormat::RGBA8: return DXGI_FORMAT_R8G8B8A8_UNORM;
-		case TextureFormat::RGBA16: return DXGI_FORMAT_R16G16B16A16_UNORM;
-		case TextureFormat::RGBA16F: return DXGI_FORMAT_R16G16B16A16_FLOAT;
-		case TextureFormat::RGBA32F: return DXGI_FORMAT_R32G32B32A32_FLOAT;
-		case TextureFormat::R16: return DXGI_FORMAT_R16_UNORM;
-		case TextureFormat::R16F: return DXGI_FORMAT_R16_FLOAT;
-		case TextureFormat::R32F: return DXGI_FORMAT_R32_FLOAT;
-		case TextureFormat::RG32F: return DXGI_FORMAT_R32G32_FLOAT;
-		case TextureFormat::BC1: return DXGI_FORMAT_BC1_UNORM;
-		case TextureFormat::BC2: return DXGI_FORMAT_BC2_UNORM;
-		case TextureFormat::BC3: return DXGI_FORMAT_BC3_UNORM;
-	}
-	ASSERT(false);
-	return DXGI_FORMAT_R8G8B8A8_UINT;
-}
-
 
 struct Program {
 	~Program() {
@@ -300,7 +220,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 			const bool as_int = attr.flags & Attribute::AS_INT;
 			const bool instanced = attr.flags & Attribute::INSTANCED;
 			descs[i].AlignedByteOffset = attr.byte_offset;
-			descs[i].Format = getDXGIFormat(attr, as_int);
+			descs[i].Format = getDXGIFormat(attr);
 			descs[i].SemanticIndex = attr.idx;
 			descs[i].SemanticName = "TEXCOORD";
 			descs[i].InputSlot = instanced ? 1 : 0;
@@ -379,84 +299,6 @@ struct D3D {
 };
 
 Local<D3D> d3d;
-
-namespace DDS
-{
-
-static u32 sizeDXTC(u32 w, u32 h, DXGI_FORMAT format) {
-	const bool is_dxt1 = format == DXGI_FORMAT_BC1_UNORM || format == DXGI_FORMAT_BC1_UNORM_SRGB;
-	const bool is_ati = format == DXGI_FORMAT_BC4_UNORM;
-	return ((w + 3) / 4) * ((h + 3) / 4) * (is_dxt1 || is_ati ? 8 : 16);
-}
-
-struct LoadInfo {
-	bool compressed;
-	bool palette;
-	DXGI_FORMAT format;
-	DXGI_FORMAT srgb_format;
-};
-
-static LoadInfo loadInfoDXT1 = {
-	true, false, DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_UNORM_SRGB
-};
-static LoadInfo loadInfoDXT3 = {
-	true, false, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC2_UNORM_SRGB
-};
-static LoadInfo loadInfoDXT5 = {
-	true, false, DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC3_UNORM_SRGB
-};
-static LoadInfo loadInfoATI1 = {
-	true, false, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_UNKNOWN
-};
-static LoadInfo loadInfoATI2 = {
-	true, false, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_UNKNOWN
-};
-static LoadInfo loadInfoBGRA8 = {
-	false, false, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
-};
-static LoadInfo loadInfoRGBA8 = {
-	false, false, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
-};
-/*static LoadInfo loadInfoBGR8 = {
-	false, false, false, 0, 0, 0, DXGI_FORMAT_B8G8R8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
-};
-static LoadInfo loadInfoBGR5A1 = {
-	false, true, false, DXGI_FORMAT_B5G5R5A1_UNORM, DXGI_FORMAT_UNKNOWN
-};
-static LoadInfo loadInfoBGR565 = {
-	false, true, false, DXGI_FORMAT_B5G6R5_UNORM, DXGI_FORMAT_UNKNOWN
-};
-static LoadInfo loadInfoIndex8 = {
-	false, false, true, 1, GL_RGB8, GL_SRGB8, GL_BGRA, GL_UNSIGNED_BYTE
-};*/
-
-static LoadInfo* getDXT10LoadInfo(const Header& hdr, const DXT10Header& dxt10_hdr)
-{
-	switch(dxt10_hdr.dxgi_format) {
-		case DxgiFormat::B8G8R8A8_UNORM_SRGB:
-		case DxgiFormat::B8G8R8A8_UNORM:
-			return &loadInfoBGRA8;
-		case DxgiFormat::R8G8B8A8_UNORM_SRGB:
-		case DxgiFormat::R8G8B8A8_UNORM:
-			return &loadInfoRGBA8;
-		case DxgiFormat::BC1_UNORM_SRGB:
-		case DxgiFormat::BC1_UNORM:
-			return &loadInfoDXT1;
-		case DxgiFormat::BC2_UNORM_SRGB:
-		case DxgiFormat::BC2_UNORM:
-			return &loadInfoDXT3;
-		case DxgiFormat::BC3_UNORM_SRGB:
-		case DxgiFormat::BC3_UNORM:
-			return &loadInfoDXT5;
-		case DxgiFormat::BC4_UNORM: return &loadInfoATI1;
-		case DxgiFormat::BC5_UNORM: return &loadInfoATI2;
-		default:
-			ASSERT(false);
-			return nullptr;
-	}
-}
-
-} // namespace DDS
 
 static void try_load_renderdoc() {
 	HMODULE lib = LoadLibrary("renderdoc.dll");
@@ -567,16 +409,21 @@ void generateMipmaps(TextureHandle texture){
 	d3d->device_ctx->GenerateMips(texture->srv);
 }
 
-void update(TextureHandle texture, u32 mip, u32 face, u32 x, u32 y, u32 w, u32 h, TextureFormat format, void* buf) {
+void update(TextureHandle texture, u32 mip, u32 x, u32 y, u32 z, u32 w, u32 h, TextureFormat format, const void* buf, u32 buf_size) {
 	ASSERT(texture);
-	ASSERT(texture->dxgi_format == getDXGIFormat(format));
+	const bool is_srgb = u32(texture->flags & TextureFlags::SRGB);
+	ASSERT(texture->dxgi_format == getDXGIFormat(format, is_srgb));
 
 	const bool no_mips = u32(texture->flags & TextureFlags::NO_MIPS);
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture->w, texture->h));
-	const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
-	const u32 bytes_per_pixel = getSize(texture->dxgi_format);
-	const UINT row_pitch = w * bytes_per_pixel;
-	const UINT depth_pitch = row_pitch * h;
+	const UINT subres = D3D11CalcSubresource(mip, z, mip_count);
+	const bool is_compressed = FormatDesc::get(format).compressed;
+	const u32 row_pitch = is_compressed ? ((w + 3) / 4) * sizeDXTC(1, 1, texture->dxgi_format) : w * getSize(texture->dxgi_format);
+	if (is_compressed) {
+		w = (w + 3) & ~3;
+		h = (h + 3) & ~3;
+	}
+	const UINT depth_pitch = is_compressed ? ((w + 3) / 4) * ((h + 3) / 4) * sizeDXTC(1, 1, texture->dxgi_format) : row_pitch * h;
 	D3D11_BOX box;
 	box.left = x;
 	box.top = y;
@@ -1370,334 +1217,18 @@ ID3D11SamplerState* getSampler(TextureFlags flags) {
 	return d3d->samplers[idx];
 }
 
-bool loadLayers(TextureHandle handle, u32 layer_offset, const void* data, int size, const char* debug_name) {
-	ASSERT(debug_name && debug_name[0]);
-	ASSERT(handle);
-	checkThread();
-	DDS::Header hdr;
-
-	InputMemoryStream blob(data, size);
-	blob.read(&hdr, sizeof(hdr));
-
-	if (hdr.dwMagic != DDS::DDS_MAGIC || hdr.dwSize != 124 ||
-		!(hdr.dwFlags & DDS::DDSD_PIXELFORMAT) || !(hdr.dwFlags & DDS::DDSD_CAPS))
-	{
-		logError("Wrong dds format or corrupted dds (", debug_name, ")");
-		return false;
-	}
-
-	DDS::LoadInfo* li;
-	int layers = 1;
-
-	if (isDXT1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT1;
-	}
-	else if (isDXT3(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT3;
-	}
-	else if (isDXT5(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT5;
-	}
-	else if (isATI1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoATI1;
-	}
-	else if (isATI2(hdr.pixelFormat)) {
-		li = &DDS::loadInfoATI2;
-	}
-	else if (isBGRA8(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGRA8;
-	}
-	/*else if (isBGR8(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGR8;
-	}
-	else if (isBGR5A1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGR5A1;
-	}
-	else if (isBGR565(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGR565;
-	}
-	else if (isINDEX8(hdr.pixelFormat)) {
-		li = &DDS::loadInfoIndex8;
-	}*/
-	else if (isDXT10(hdr.pixelFormat)) {
-		DDS::DXT10Header dxt10_hdr;
-		blob.read(dxt10_hdr);
-		li = DDS::getDXT10LoadInfo(hdr, dxt10_hdr);
-		if (!li) return false;
-		layers = dxt10_hdr.array_size;
-	}
-	else {
-		ASSERT(false);
-		return false;
-	}
-
-	const bool is_cubemap = (hdr.caps2.dwCaps2 & DDS::DDSCAPS2_CUBEMAP) != 0;
-	const bool is_srgb = u32(handle->flags & TextureFlags::SRGB);
-	const bool is_3d = u32(handle->flags & TextureFlags::IS_3D);
-	ASSERT(!is_3d); // TODO
-	const DXGI_FORMAT internal_format = is_srgb ? li->srgb_format : li->format;
-	const u32 mip_count = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
-	Texture& texture = *handle;
-
-	u32 srd_idx = 0;
-	for(int side = 0; side < (is_cubemap ? 6 : 1); ++side) {
-		for (u32 layer = layer_offset; layer < layer_offset + layers; ++layer) {
-			if (li->compressed) {
-				for (u32 mip = 0; mip < mip_count; ++mip) {
-					const u32 width = ((maximum(1, hdr.dwWidth >> mip) + 3 ) / 4) * 4;
-					const u32 height = ((maximum(1, hdr.dwHeight >> mip) + 3 ) / 4) * 4;
-					const u32 size = DDS::sizeDXTC(width, height, internal_format);
-
-					const UINT subres = D3D11CalcSubresource(mip, layer * (is_cubemap ? 6 : 1) + side, mip_count);
-					u32 row_pitch = ((width + 3) / 4) * DDS::sizeDXTC(1, 1, internal_format);
-					u32 depth_pitch = ((height + 3) / 4) * row_pitch;
-					const void* mem = blob.skip(size);
-
-					D3D11_BOX box;
-					box.left = 0;
-					box.top = 0;
-					box.right =  width;
-					box.bottom = height;
-					box.front = 0;
-					box.back = 1;
-	
-					d3d->device_ctx->UpdateSubresource(texture.texture2D, subres, &box, mem, row_pitch, depth_pitch);
-				}
-			}
-			else if (li->palette) {
-				// TODO
-				ASSERT(false);
-			}
-			else {
-				const u32 bytes_per_px = getSize(internal_format);
-				for (u32 mip = 0; mip < mip_count; ++mip) {
-					const u32 width = maximum(1, hdr.dwWidth >> mip);
-					const u32 height = maximum(1, hdr.dwHeight >> mip);
-
-					const UINT subres = D3D11CalcSubresource(mip, layer * (is_cubemap ? 6 : 1) + side, mip_count);
-					u32 row_pitch = width * bytes_per_px;
-					u32 depth_pitch = width * height * bytes_per_px;
-					const void* mem = blob.skip(size);
-
-					D3D11_BOX box;
-					box.left = 0;
-					box.top = 0;
-					box.right =  width;
-					box.bottom = height;
-					box.front = 0;
-					box.back = 1;
-	
-					d3d->device_ctx->UpdateSubresource(texture.texture2D, subres, &box, mem, row_pitch, depth_pitch);
-				}
-			}
-		}
-	}
-
-	return true;
-}
-
-bool loadTexture(TextureHandle handle, const void* data, int size, TextureFlags flags, const char* debug_name) { 
-	ASSERT(debug_name && debug_name[0]);
-	ASSERT(handle);
-	checkThread();
-	DDS::Header hdr;
-
-	InputMemoryStream blob(data, size);
-	blob.read(&hdr, sizeof(hdr));
-
-	if (hdr.dwMagic != DDS::DDS_MAGIC || hdr.dwSize != 124 ||
-		!(hdr.dwFlags & DDS::DDSD_PIXELFORMAT) || !(hdr.dwFlags & DDS::DDSD_CAPS))
-	{
-		logError("Wrong dds format or corrupted dds (", debug_name, ")");
-		return false;
-	}
-
-	DDS::LoadInfo* li;
-	int layers = 1;
-
-	if (isDXT1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT1;
-	}
-	else if (isDXT3(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT3;
-	}
-	else if (isDXT5(hdr.pixelFormat)) {
-		li = &DDS::loadInfoDXT5;
-	}
-	else if (isATI1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoATI1;
-	}
-	else if (isATI2(hdr.pixelFormat)) {
-		li = &DDS::loadInfoATI2;
-	}
-	else if (isBGRA8(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGRA8;
-	}
-	/*else if (isBGR8(hdr.pixelFormat)) {
-		ASSERT(false);
-		li = &DDS::loadInfoBGR8;
-	}
-	else if (isBGR5A1(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGR5A1;
-	}
-	else if (isBGR565(hdr.pixelFormat)) {
-		li = &DDS::loadInfoBGR565;
-	}
-	else if (isINDEX8(hdr.pixelFormat)) {
-		li = &DDS::loadInfoIndex8;
-	}*/
-	else if (isDXT10(hdr.pixelFormat)) {
-		DDS::DXT10Header dxt10_hdr;
-		blob.read(dxt10_hdr);
-		li = DDS::getDXT10LoadInfo(hdr, dxt10_hdr);
-		if (!li) return false;
-		layers = dxt10_hdr.array_size;
-	}
-	else {
-		ASSERT(false);
-		return false;
-	}
-
-	const bool is_cubemap = (hdr.caps2.dwCaps2 & DDS::DDSCAPS2_CUBEMAP) != 0;
-	const bool is_srgb = u32(flags & TextureFlags::SRGB);
-	const DXGI_FORMAT internal_format = is_srgb ? li->srgb_format : li->format;
-	const u32 mip_count = (hdr.dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr.dwMipMapCount : 1;
-	Texture& texture = *handle;
-	texture.flags = flags;
-	texture.w = hdr.dwWidth;
-	texture.h = hdr.dwHeight;
-	#ifdef LUMIX_DEBUG
-		texture.name = debug_name;
-	#endif
-
-	D3D11_SUBRESOURCE_DATA* srd = (D3D11_SUBRESOURCE_DATA*)_alloca(sizeof(D3D11_SUBRESOURCE_DATA) * mip_count * layers * (is_cubemap ? 6 : 1));
-	u32 srd_idx = 0;
-	for(int side = 0; side < (is_cubemap ? 6 : 1); ++side) {
-		for (int layer = 0; layer < layers; ++layer) {
-			if (li->compressed) {
-				ASSERT(hdr.dwWidth % 4 == 0);
-				ASSERT(hdr.dwHeight % 4 == 0);
-				for (u32 mip = 0; mip < mip_count; ++mip) {
-					const u32 width = maximum(1, hdr.dwWidth >> mip);
-					const u32 height = maximum(1, hdr.dwHeight >> mip);
-					const u32 size = DDS::sizeDXTC(width, height, internal_format);
-					srd[srd_idx].pSysMem = (const u8*)blob.getData() + blob.getPosition();
-					srd[srd_idx].SysMemPitch = ((width + 3) / 4) * DDS::sizeDXTC(1, 1, internal_format);
-					srd[srd_idx].SysMemSlicePitch = ((height + 3) / 4) * srd[srd_idx].SysMemPitch;
-					blob.skip(srd[srd_idx].SysMemSlicePitch);
-					++srd_idx;
-				}
-			}
-			else if (li->palette) {
-				// TODO
-				ASSERT(false);
-			}
-			else {
-				const u32 bytes_per_px = getSize(internal_format);
-				for (u32 mip = 0; mip < mip_count; ++mip) {
-					const u32 width = maximum(1, hdr.dwWidth >> mip);
-					const u32 height = maximum(1, hdr.dwHeight >> mip);
-					srd[srd_idx].pSysMem = (const u8*)blob.getData() + blob.getPosition();
-					srd[srd_idx].SysMemPitch = width * bytes_per_px;
-					srd[srd_idx].SysMemSlicePitch = height * width * bytes_per_px;
-					blob.skip(srd[srd_idx].SysMemSlicePitch);
-					++srd_idx;
-				}
-			}
-		}
-	}
-
-	if (is_cubemap) {
-		D3D11_TEXTURE2D_DESC desc = {};
-
-		desc.Width = hdr.dwWidth;
-		desc.Height = hdr.dwHeight;
-		desc.ArraySize = 6;
-		desc.MipLevels = mip_count;
-		desc.CPUAccessFlags = 0;
-		desc.Format = is_srgb ? li->srgb_format : li->format;
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		desc.MiscFlags = 0;
-		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.SampleDesc.Count = 1;
-		desc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
-		texture.dxgi_format = desc.Format;
-		HRESULT hr = d3d->device->CreateTexture2D(&desc, srd, &texture.texture2D);
-		ASSERT(SUCCEEDED(hr));
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-		srv_desc.Format = toViewFormat(desc.Format);
-		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-		srv_desc.TextureCube.MipLevels = mip_count;
-
-		hr = d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
-		ASSERT(SUCCEEDED(hr));
-	} else if (layers > 1) {
-		D3D11_TEXTURE2D_DESC desc = {};
-
-		desc.Width = hdr.dwWidth;
-		desc.Height = hdr.dwHeight;
-		desc.ArraySize = layers;
-		desc.MipLevels = mip_count;
-		desc.CPUAccessFlags = 0;
-		desc.Format = is_srgb ? li->srgb_format : li->format;
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		desc.MiscFlags = 0;
-		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.SampleDesc.Count = 1;
-		texture.dxgi_format = desc.Format;
-		HRESULT hr = d3d->device->CreateTexture2D(&desc, srd, &texture.texture2D);
-		ASSERT(SUCCEEDED(hr));
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-		srv_desc.Format = toViewFormat(desc.Format);
-		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-		srv_desc.Texture2DArray.MipLevels = mip_count;
-		srv_desc.Texture2DArray.ArraySize = layers;
-		srv_desc.Texture2DArray.FirstArraySlice = 0;
-
-		hr = d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
-		ASSERT(SUCCEEDED(hr));
-	} else {
-		D3D11_TEXTURE2D_DESC desc = {};
-		desc.Width = hdr.dwWidth;
-		desc.Height = hdr.dwHeight;
-		desc.ArraySize = layers;
-		desc.MipLevels = mip_count;
-		desc.CPUAccessFlags = 0;
-		desc.Format = is_srgb ? li->srgb_format : li->format;
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		desc.MiscFlags = 0;
-		desc.SampleDesc.Count = 1;
-		desc.Usage = D3D11_USAGE_DEFAULT;
-		texture.dxgi_format = desc.Format;
-		HRESULT hr = d3d->device->CreateTexture2D(&desc, srd, &texture.texture2D);
-		ASSERT(SUCCEEDED(hr));
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-		srv_desc.Format = toViewFormat(desc.Format);
-		srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-		srv_desc.Texture2D.MipLevels = mip_count;
-
-		hr = d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
-		ASSERT(SUCCEEDED(hr));
-	}
-
-	texture.sampler = getSampler(flags);
-
-	return true;
-}
-
 static bool canGenMips(TextureFormat format) {
 	switch(format) {
 		case TextureFormat::BC1: 
 		case TextureFormat::BC2: 
-		case TextureFormat::BC3: return false;
+		case TextureFormat::BC3: 
+		case TextureFormat::BC4: 
+		case TextureFormat::BC5: return false;
 		default: return true;
 	}
 }
 
-bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const void* data, const char* debug_name)
+bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const char* debug_name)
 {
 	ASSERT(handle);
 	const bool is_srgb = u32(flags & TextureFlags::SRGB);
@@ -1710,6 +1241,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 	switch (format) {
 		case TextureFormat::R8:
+		case TextureFormat::BGRA8:
 		case TextureFormat::RGBA8:
 		case TextureFormat::RGBA32F:
 		case TextureFormat::R32F:
@@ -1718,7 +1250,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::SRGBA: 
 		case TextureFormat::BC1: 
 		case TextureFormat::BC2: 
-		case TextureFormat::BC3: break;
+		case TextureFormat::BC3:
+		case TextureFormat::BC4:
+		case TextureFormat::BC5: break;
 		
 		case TextureFormat::RG8:
 		case TextureFormat::R16:
@@ -1726,7 +1260,6 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::R16F: 
 		case TextureFormat::RGBA16F: 
 		case TextureFormat::D32: 
-		case TextureFormat::D24: 
 		case TextureFormat::D24S8: ASSERT(no_mips); break;
 		default: ASSERT(false); return false;
 	}
@@ -1744,7 +1277,8 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	D3D11_TEXTURE3D_DESC desc_3d = {};
 	D3D11_TEXTURE2D_DESC desc_2d = {};
 	
-	const bool is_depth_format = isDepthFormat(getDXGIFormat(format));
+	const DXGI_FORMAT dxgi_format = getDXGIFormat(format, is_srgb);
+	const bool is_depth_format = isDepthFormat(dxgi_format);
 	const bool gen_mip = !readback && !no_mips && !is_depth_format && canGenMips(format);
 	auto fill_desc = [&](auto& desc){
 		desc.Width = w;
@@ -1752,7 +1286,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		desc.MipLevels = mip_count;
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.CPUAccessFlags = 0;
-		desc.Format = getDXGIFormat(format);
+		desc.Format = dxgi_format;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 		if (is_render_target || gen_mip) {
 			desc.BindFlags |= is_depth_format ? D3D11_BIND_DEPTH_STENCIL : D3D11_BIND_RENDER_TARGET;
@@ -1786,20 +1320,12 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		if(debug_name && debug_name[0]) {
 			texture.texture3D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
 		}
-		if (data) {
-			const u32 bytes_per_pixel = getSize(desc_3d.Format);
-			d3d->device_ctx->UpdateSubresource(texture.texture3D, 0, nullptr, data, w * bytes_per_pixel, w  * h * bytes_per_pixel);
-		}
 	}
 	else {
 		d3d->device->CreateTexture2D(&desc_2d, nullptr, &texture.texture2D);
 		ASSERT(texture.texture2D);
 		if(debug_name && debug_name[0]) {
 			texture.texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
-		}
-		if (data) {
-			const u32 bytes_per_pixel = getSize(desc_2d.Format);
-			d3d->device_ctx->UpdateSubresource(texture.texture2D, 0, nullptr, data, w * bytes_per_pixel, w  * h * bytes_per_pixel);
 		}
 	}
 
@@ -1840,9 +1366,6 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 			srv_desc.Texture2D.MipLevels = mip_count;
 			d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
-		}
-		if (data && gen_mip && data != nullptr) {
-			d3d->device_ctx->GenerateMips(texture.srv);
 		}
 	}
 	return true;
@@ -2068,28 +1591,6 @@ void drawArrays(PrimitiveType type, u32 offset, u32 count)
 }
 
 bool isOriginBottomLeft() { return false; }
-
-TextureInfo getTextureInfo(const void* data)
-{
-	TextureInfo info;
-
-	const DDS::Header* hdr = (const DDS::Header*)data;
-	info.width = hdr->dwWidth;
-	info.height = hdr->dwHeight;
-	info.is_cubemap = (hdr->caps2.dwCaps2 & DDS::DDSCAPS2_CUBEMAP) != 0;
-	info.mips = (hdr->dwFlags & DDS::DDSD_MIPMAPCOUNT) ? hdr->dwMipMapCount : 1;
-	info.depth = (hdr->dwFlags & DDS::DDSD_DEPTH) ? hdr->dwDepth : 1;
-	
-	if (isDXT10(hdr->pixelFormat)) {
-		const DDS::DXT10Header* hdr_dxt10 = (const DDS::DXT10Header*)((const u8*)data + sizeof(DDS::Header));
-		info.layers = hdr_dxt10->array_size;
-	}
-	else {
-		info.layers = 1;
-	}
-	
-	return info;
-}
 
 void destroy(BufferHandle buffer) {
 	checkThread();
