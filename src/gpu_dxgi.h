@@ -70,7 +70,7 @@ struct FormatDesc {
 			case TextureFormat::R16: return {		false,		2,	DXGI_FORMAT_R16_UNORM,				DXGI_FORMAT_UNKNOWN};
 			case TextureFormat::R8: return {		false,		1,	DXGI_FORMAT_R8_UNORM,				DXGI_FORMAT_UNKNOWN};
 			case TextureFormat::RG8: return {		false,		2,	DXGI_FORMAT_R8G8_UNORM,				DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::BGRA8: return {		false,		4,	DXGI_FORMAT_B8G8R8A8_UNORM,			DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::BGRA8: return {		false,		4,	DXGI_FORMAT_B8G8R8A8_UNORM,			DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
 			case TextureFormat::SRGBA: return {		false,		4,	DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,	DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
 			case TextureFormat::RGBA8: return {		false,		4,	DXGI_FORMAT_R8G8B8A8_UNORM,			DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
 			case TextureFormat::RGBA16: return {	false,		8,	DXGI_FORMAT_R16G16B16A16_UNORM,		DXGI_FORMAT_UNKNOWN};
