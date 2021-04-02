@@ -50,7 +50,7 @@ namespace Lumix {
 namespace gpu {
 
 static constexpr u32 NUM_BACKBUFFERS = 3;
-static constexpr u32 SCRATCH_BUFFER_SIZE = 4 * 1024 * 1024;
+static constexpr u32 SCRATCH_BUFFER_SIZE = 8 * 1024 * 1024;
 static constexpr u32 MAX_DESCRIPTORS = 128 * 1024;
 static constexpr u32 QUERY_COUNT = 2048;
 static constexpr u32 INVALID_HEAP_ID = 0xffFFffFF;
