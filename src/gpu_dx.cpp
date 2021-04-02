@@ -1264,7 +1264,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		default: ASSERT(false); return false;
 	}
 
-	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
+	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, is_3d ? depth : 1));
 	Texture& texture = *handle;
 	texture.flags = flags;
 	texture.sampler = getSampler(flags);
@@ -1357,8 +1357,23 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		}
 		else if (is_cubemap) {
 			srv_desc.Format = toViewFormat(desc_2d.Format);
-			srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-			srv_desc.TextureCube.MipLevels = mip_count;
+			if (depth > 1) {
+				srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
+				srv_desc.TextureCubeArray.MipLevels = mip_count;
+				srv_desc.TextureCubeArray.NumCubes = depth;
+				d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
+			}
+			else {
+				srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+				srv_desc.TextureCube.MipLevels = mip_count;
+				d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
+			}
+		}
+		else if (depth > 1) {
+			srv_desc.Format = toViewFormat(desc_2d.Format);
+			srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+			srv_desc.Texture2DArray.MipLevels = mip_count;
+			srv_desc.Texture2DArray.ArraySize = depth;
 			d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 		}
 		else {

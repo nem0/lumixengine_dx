@@ -1891,7 +1891,21 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 		uav_desc.Texture2D.MipSlice = 0;
 		uav_desc.Texture2D.PlaneSlice = 0;
-	} else {
+	} else if (depth > 1) {
+		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+		srv_desc.Texture2DArray.MipLevels = mip_count;
+		srv_desc.Texture2DArray.MipLevels = mip_count;
+		srv_desc.Texture2DArray.MostDetailedMip = 0;
+		srv_desc.Texture2DArray.ResourceMinLODClamp = 0;
+		srv_desc.Texture2DArray.PlaneSlice = 0;
+		srv_desc.Texture2DArray.ArraySize = depth;
+
+		uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+		uav_desc.Texture2DArray.MipSlice = 0;
+		uav_desc.Texture2DArray.PlaneSlice = 0;
+		uav_desc.Texture2DArray.ArraySize = depth;
+	}
+	else {
 		srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srv_desc.Texture2D.MipLevels = mip_count;
 		srv_desc.Texture2D.MostDetailedMip = 0;
