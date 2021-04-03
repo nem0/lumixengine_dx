@@ -1066,59 +1066,75 @@ void update(TextureHandle texture, u32 mip, u32 x, u32 y, u32 z, u32 w, u32 h, T
 	d3d->frame->to_release.push(staging);
 }
 
-void copy(TextureHandle dst_handle, TextureHandle src_handle, u32 dst_x, u32 dst_y) {
-	// Texture& dst = d3d->textures[dst_handle.value];
-	// Texture& src = d3d->textures[src_handle.value];
-	// const bool no_mips = src.flags & (u32)TextureFlags::NO_MIPS;
-	// const u32 src_mip_count = no_mips ? 1 : 1 + log2(maximum(src.w, src.h));
-	// const u32 dst_mip_count = no_mips ? 1 : 1 + log2(maximum(dst.w, dst.h));
-	//
-	// u32 mip = 0;
-	// while ((src.w >> mip) != 0 || (src.h >> mip) != 0) {
-	//	const u32 w = maximum(src.w >> mip, 1);
-	//	const u32 h = maximum(src.h >> mip, 1);
-	//
-	//	if (src.flags & (u32)TextureFlags::IS_CUBE) {
-	//		for (u32 face = 0; face < 6; ++face) {
-	//			const UINT src_subres = D3D11CalcSubresource(mip, face,
-	// src_mip_count); 			const UINT dst_subres = D3D11CalcSubresource(mip, face,
-	// dst_mip_count); 			d3d->device_ctx->CopySubresourceRegion(dst.texture2D,
-	// dst_subres, dst_x, dst_y, 0, src.texture2D,
-	// src_subres, nullptr);
-	//		}
-	//	}
-	//	else {
-	//		const UINT src_subres = D3D11CalcSubresource(mip, 0, src_mip_count);
-	//		const UINT dst_subres = D3D11CalcSubresource(mip, 0, dst_mip_count);
-	//		d3d->device_ctx->CopySubresourceRegion(dst.texture2D, dst_subres,
-	// dst_x, dst_y, 0, src.texture2D, src_subres,
-	// nullptr);
-	//	}
-	//	++mip;
-	//	if (src.flags & (u32)TextureFlags::NO_MIPS) break;
-	//	if (dst.flags & (u32)TextureFlags::NO_MIPS) break;
-	//}
-	ASSERT(false); // TODO
+void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
+	/*ASSERT(dst);
+	ASSERT(src);
+
+	const bool no_mips = u32(src->flags & TextureFlags::NO_MIPS);
+	const u32 src_mip_count = no_mips ? 1 : 1 + log2(maximum(src->w, src->h));
+	const u32 dst_mip_count = no_mips ? 1 : 1 + log2(maximum(dst->w, dst->h));
+
+	const D3D12_RESOURCE_STATES src_prev_state = src->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	const D3D12_RESOURCE_STATES dst_prev_state = dst->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
+
+	u32 mip = 0;
+	while ((src->w >> mip) != 0 || (src->h >> mip) != 0) {
+		const u32 w = maximum(src->w >> mip, 1);
+		const u32 h = maximum(src->h >> mip, 1);
+
+		if (u32(src->flags & TextureFlags::IS_CUBE)) {
+			ASSERT(false); // TODO
+			for (u32 face = 0; face < 6; ++face) {
+				const UINT src_subres = mip +  face * src_mip_count;
+				const UINT dst_subres = mip +  face * dst_mip_count;
+				D3D12_TEXTURE_COPY_LOCATION dst = {};
+				D3D12_TEXTURE_COPY_LOCATION src = {};
+				D3D12_BOX src_box;
+				d3d->cmd_list->CopyTextureRegion(&dst, dst_x, dst_y, 0, &src, &src_box);
+				//d3d->cmd_list->CopyTextureRegion(dst->texture2D, dst_subres, dst_x, dst_y, 0, src->texture2D, src_subres, nullptr);
+			}
+		}
+		else {
+			D3D12_TEXTURE_COPY_LOCATION dst_loc = {};
+			D3D12_TEXTURE_COPY_LOCATION src_loc = {};
+			src_loc.pResource = src->resource;
+			src_loc.SubresourceIndex = mip;
+			dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+			dst_loc.pResource = dst->resource;
+			dst_loc.SubresourceIndex = mip;
+			dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+			d3d->cmd_list->CopyTextureRegion(&dst_loc, dst_x, dst_y, 0, &src_loc, nullptr);
+		}
+		++mip;
+		if (u32(src->flags & TextureFlags::NO_MIPS)) break;
+		if (u32(dst->flags & TextureFlags::NO_MIPS)) break;
+	}
+	src->setState(d3d->cmd_list, src_prev_state);
+	dst->setState(d3d->cmd_list, dst_prev_state);*/
+	ASSERT(false);
 }
 
-void readTexture(TextureHandle handle, u32 mip, Span<u8> buf) {
-	// Texture& texture = d3d->textures[handle.value];
-	//
-	// D3D11_MAPPED_SUBRESOURCE data;
-	//
-	// const u32 faces = (texture.flags & (u32)TextureFlags::IS_CUBE) ? 6 : 1;
-	// const bool no_mips = texture.flags & (u32)TextureFlags::NO_MIPS;
-	// const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture.w,
-	// texture.h)); u8* ptr = buf.begin();
-	//
-	// for (u32 face = 0; face < faces; ++face) {
-	//	const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
-	//	d3d->device_ctx->Map(texture.texture2D, subres, D3D11_MAP_READ, 0,
-	//&data); 	ASSERT(data.DepthPitch == buf.length() / faces); 	memcpy(ptr,
-	// data.pData, data.DepthPitch); 	ptr += data.DepthPitch;
-	//	d3d->device_ctx->Unmap(texture.texture2D, subres);
-	//}
-	ASSERT(false); // TODO
+void readTexture(TextureHandle texture, u32 mip, Span<u8> buf) {
+	/*ASSERT(texture);
+	
+	const u32 faces = u32(texture->flags & TextureFlags::IS_CUBE) ? 6 : 1;
+	const bool no_mips = u32(texture->flags & TextureFlags::NO_MIPS);
+	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture->w, texture->h));
+	u8* ptr = buf.begin();
+	const FormatDesc& fd = FormatDesc::get(texture->dxgi_format);
+	
+	for (u32 face = 0; face < faces; ++face) {
+		const UINT subres = mip + face * mip_count;
+		void* data;
+		texture->resource->Map(subres, nullptr, &data);
+		u32 size = fd.getRowPitch(maximum(1, texture->w >> mip));
+		if (fd.compressed) size *= (texture->h + 3) / 4;
+		else size *= texture->h;
+		memcpy(ptr, data, size);
+		ptr += size;
+		texture->resource->Unmap(mip, nullptr);
+	}*/
+	ASSERT(false);
 }
 
 void queryTimestamp(QueryHandle query) {

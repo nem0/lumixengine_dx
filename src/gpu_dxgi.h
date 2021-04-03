@@ -59,6 +59,29 @@ struct FormatDesc {
 
 		return w * block_bytes;
 	}
+	
+	static FormatDesc get(DXGI_FORMAT format) {
+		switch(format) {
+			case DXGI_FORMAT_BC1_UNORM : return get(TextureFormat::BC1);
+			case DXGI_FORMAT_BC2_UNORM : return get(TextureFormat::BC2);
+			case DXGI_FORMAT_BC3_UNORM : return get(TextureFormat::BC3);
+			case DXGI_FORMAT_BC4_UNORM : return get(TextureFormat::BC4);
+			case DXGI_FORMAT_BC5_UNORM : return get(TextureFormat::BC5);
+			case DXGI_FORMAT_R16_UNORM : return get(TextureFormat::R16);
+			case DXGI_FORMAT_R8_UNORM : return get(TextureFormat::R8);
+			case DXGI_FORMAT_R8G8_UNORM : return get(TextureFormat::RG8);
+			case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : return get(TextureFormat::SRGBA);
+			case DXGI_FORMAT_R8G8B8A8_UNORM : return get(TextureFormat::RGBA8);
+			case DXGI_FORMAT_R16G16B16A16_UNORM : return get(TextureFormat::RGBA16);
+			case DXGI_FORMAT_R16G16B16A16_FLOAT : return get(TextureFormat::RGBA16F);
+			case DXGI_FORMAT_R32G32B32A32_FLOAT : return get(TextureFormat::RGBA32F);
+			case DXGI_FORMAT_R32G32_FLOAT : return get(TextureFormat::RG32F);
+			
+			case DXGI_FORMAT_R32_TYPELESS : return get(TextureFormat::D32);
+			case DXGI_FORMAT_R24G8_TYPELESS : return get(TextureFormat::D24S8);
+			default: ASSERT(false); return {}; 
+		}
+	}
 
 	static FormatDesc get(TextureFormat format) {
 		switch(format) {
