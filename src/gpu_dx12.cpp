@@ -836,14 +836,15 @@ LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAlloc
 			D3D12_SAMPLER_DESC desc = {};
 			ASSERT(srvs[i].texture);
 			const Texture& t = *srvs[i].texture;
+			const bool is_aniso = u32(t.flags & TextureFlags::ANISOTROPIC_FILTER);
 			desc.AddressU = u32(t.flags & TextureFlags::CLAMP_U) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			desc.AddressV = u32(t.flags & TextureFlags::CLAMP_V) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			desc.AddressW = u32(t.flags & TextureFlags::CLAMP_W) != 0 ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			desc.MipLODBias = 0;
-			desc.Filter = u32(t.flags & TextureFlags::POINT_FILTER) ? D3D12_FILTER_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+			desc.Filter = is_aniso ? D3D12_FILTER_ANISOTROPIC : u32(t.flags & TextureFlags::POINT_FILTER) ? D3D12_FILTER_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 			desc.MaxLOD = 1000;
 			desc.MinLOD = -1000;
-			desc.MaxAnisotropy = 1;
+			desc.MaxAnisotropy = is_aniso ? 8 : 1;
 			desc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
 			d3d->device->CreateSampler(&desc, cpu);
 		}

@@ -284,7 +284,7 @@ struct D3D {
 	BufferHandle current_indirect_buffer = INVALID_BUFFER;
 	Window windows[64];
 	Window* current_window = windows;
-	ID3D11SamplerState* samplers[2*2*2*2];
+	ID3D11SamplerState* samplers[2*2*2*2*2];
 
 	FrameBuffer current_framebuffer;
 
@@ -474,13 +474,20 @@ void readTexture(TextureHandle texture, u32 mip, Span<u8> buf) {
 	const bool no_mips = u32(texture->flags & TextureFlags::NO_MIPS);
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture->w, texture->h));
 	u8* ptr = buf.begin();
+	const FormatDesc& fd = FormatDesc::get(texture->dxgi_format);
+	ASSERT(!fd.compressed);
+	const u32 pitch = fd.getRowPitch(texture->w);
 	
 	for (u32 face = 0; face < faces; ++face) {
 		const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
 		d3d->device_ctx->Map(texture->texture2D, subres, D3D11_MAP_READ, 0, &data);
-		ASSERT(data.DepthPitch == buf.length() / faces);
-		memcpy(ptr, data.pData, data.DepthPitch);
-		ptr += data.DepthPitch;
+		ASSERT(data.DepthPitch >= buf.length() / faces);
+		const u8* src_ptr = (const u8*)data.pData;
+		for (u32 i = 0; i < texture->h; ++i) {
+			memcpy(ptr, src_ptr, pitch);
+			ptr += pitch;
+			src_ptr += data.RowPitch;
+		}
 		d3d->device_ctx->Unmap(texture->texture2D, subres);
 	}
 }
@@ -1200,10 +1207,11 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 }
 
 ID3D11SamplerState* getSampler(TextureFlags flags) {
-	const u32 idx = (u32)flags & 0b1111;
+	const u32 idx = (u32)flags & 0b11111;
 	if (!d3d->samplers[idx]) {
 		D3D11_SAMPLER_DESC sampler_desc = {};
-		sampler_desc.Filter = u32(flags & TextureFlags::POINT_FILTER) ? D3D11_FILTER_MIN_MAG_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+		const bool is_aniso = u32(flags & TextureFlags::ANISOTROPIC_FILTER);
+		sampler_desc.Filter = is_aniso ? D3D11_FILTER_ANISOTROPIC : u32(flags & TextureFlags::POINT_FILTER) ? D3D11_FILTER_MIN_MAG_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 		sampler_desc.AddressU = u32(flags & TextureFlags::CLAMP_U) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
 		sampler_desc.AddressV = u32(flags & TextureFlags::CLAMP_V) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
 		sampler_desc.AddressW = u32(flags & TextureFlags::CLAMP_W) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
@@ -1211,6 +1219,7 @@ ID3D11SamplerState* getSampler(TextureFlags flags) {
 		sampler_desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
 		sampler_desc.MinLOD = 0.f;
 		sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+		sampler_desc.MaxAnisotropy = is_aniso ? 8 : 1;
 		d3d->device->CreateSamplerState(&sampler_desc, &d3d->samplers[idx]);
 	}
 
