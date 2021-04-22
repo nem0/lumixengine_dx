@@ -19,7 +19,6 @@
 #include <dxgi1_6.h>
 #include <cassert>
 #include <malloc.h>
-#include "renderer/gpu/dds.h"
 #include "renderer/gpu/renderdoc_app.h"
 #include "stb/stb_image_resize.h"
 
