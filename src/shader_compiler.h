@@ -132,11 +132,11 @@ struct ShaderCompiler {
 		ASSERT(input.srcs.length() == input.types.length());
 		out[0] = getTypeDefine(type);
 		out[1] = "#define LUMIX_DX_SHADER\n";
-		for(u32 i = 0; i < input.prefixes.length(); ++i) {
-			out[i + 2] = input.prefixes[i];
-		}
 		for (u32 i = 0; i < input.decl.attributes_count; ++i) {
-			out[i + 2 + input.prefixes.length()] = getAttrDefine(input.decl.attributes[i].idx); 
+			out[i + 2] = getAttrDefine(input.decl.attributes[i].idx); 
+		}
+		for(u32 i = 0; i < input.prefixes.length(); ++i) {
+			out[i + 2 + input.decl.attributes_count] = input.prefixes[i];
 		}
 
 		u32 sc = 0;
