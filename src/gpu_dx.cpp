@@ -475,14 +475,16 @@ void readTexture(TextureHandle texture, u32 mip, Span<u8> buf) {
 	u8* ptr = buf.begin();
 	const FormatDesc& fd = FormatDesc::get(texture->dxgi_format);
 	ASSERT(!fd.compressed);
-	const u32 pitch = fd.getRowPitch(texture->w);
+	const u32 w = maximum(1, texture->w >> mip);
+	const u32 h = maximum(1, texture->h >> mip);
+	const u32 pitch = fd.getRowPitch(w);
 	
 	for (u32 face = 0; face < faces; ++face) {
 		const UINT subres = D3D11CalcSubresource(mip, face, mip_count);
 		d3d->device_ctx->Map(texture->texture2D, subres, D3D11_MAP_READ, 0, &data);
 		ASSERT(data.DepthPitch >= buf.length() / faces);
 		const u8* src_ptr = (const u8*)data.pData;
-		for (u32 i = 0; i < texture->h; ++i) {
+		for (u32 i = 0; i < h; ++i) {
 			memcpy(ptr, src_ptr, pitch);
 			ptr += pitch;
 			src_ptr += data.RowPitch;
