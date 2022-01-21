@@ -75,6 +75,7 @@ struct FormatDesc {
 			case DXGI_FORMAT_R16G16B16A16_UNORM : return get(TextureFormat::RGBA16);
 			case DXGI_FORMAT_R16G16B16A16_FLOAT : return get(TextureFormat::RGBA16F);
 			case DXGI_FORMAT_R32G32B32A32_FLOAT : return get(TextureFormat::RGBA32F);
+			case DXGI_FORMAT_R11G11B10_FLOAT : return get(TextureFormat::R11G11B10F);
 			case DXGI_FORMAT_R32G32_FLOAT : return get(TextureFormat::RG32F);
 			
 			case DXGI_FORMAT_R32_TYPELESS : return get(TextureFormat::D32);
@@ -85,24 +86,25 @@ struct FormatDesc {
 
 	static FormatDesc get(TextureFormat format) {
 		switch(format) {
-			case TextureFormat::BC1: return {		true,		8,	DXGI_FORMAT_BC1_UNORM,				DXGI_FORMAT_BC1_UNORM_SRGB};
-			case TextureFormat::BC2: return {		true,		16,	DXGI_FORMAT_BC2_UNORM,				DXGI_FORMAT_BC2_UNORM_SRGB};
-			case TextureFormat::BC3: return {		true,		16,	DXGI_FORMAT_BC3_UNORM,				DXGI_FORMAT_BC3_UNORM_SRGB};
-			case TextureFormat::BC4: return {		true,		8,	DXGI_FORMAT_BC4_UNORM,				DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::BC5: return {		true,		16,	DXGI_FORMAT_BC5_UNORM,				DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::R16: return {		false,		2,	DXGI_FORMAT_R16_UNORM,				DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::R8: return {		false,		1,	DXGI_FORMAT_R8_UNORM,				DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::RG8: return {		false,		2,	DXGI_FORMAT_R8G8_UNORM,				DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::BGRA8: return {		false,		4,	DXGI_FORMAT_B8G8R8A8_UNORM,			DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
-			case TextureFormat::SRGBA: return {		false,		4,	DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,	DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
-			case TextureFormat::RGBA8: return {		false,		4,	DXGI_FORMAT_R8G8B8A8_UNORM,			DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
-			case TextureFormat::RGBA16: return {	false,		8,	DXGI_FORMAT_R16G16B16A16_UNORM,		DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::RGBA16F: return {	false,		8,	DXGI_FORMAT_R16G16B16A16_FLOAT,		DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::RGBA32F: return {	false,		16, DXGI_FORMAT_R32G32B32A32_FLOAT,		DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::RG32F: return {		false,		8,	DXGI_FORMAT_R32G32_FLOAT,			DXGI_FORMAT_UNKNOWN};
-																										
-			case TextureFormat::D32: return {		false,		4,	DXGI_FORMAT_R32_TYPELESS,			DXGI_FORMAT_UNKNOWN};
-			case TextureFormat::D24S8: return {		false,		4,	DXGI_FORMAT_R24G8_TYPELESS,			DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::BC1: return {			true,		8,	DXGI_FORMAT_BC1_UNORM,				DXGI_FORMAT_BC1_UNORM_SRGB};
+			case TextureFormat::BC2: return {			true,		16,	DXGI_FORMAT_BC2_UNORM,				DXGI_FORMAT_BC2_UNORM_SRGB};
+			case TextureFormat::BC3: return {			true,		16,	DXGI_FORMAT_BC3_UNORM,				DXGI_FORMAT_BC3_UNORM_SRGB};
+			case TextureFormat::BC4: return {			true,		8,	DXGI_FORMAT_BC4_UNORM,				DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::BC5: return {			true,		16,	DXGI_FORMAT_BC5_UNORM,				DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::R16: return {			false,		2,	DXGI_FORMAT_R16_UNORM,				DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::R8: return {			false,		1,	DXGI_FORMAT_R8_UNORM,				DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::RG8: return {			false,		2,	DXGI_FORMAT_R8G8_UNORM,				DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::BGRA8: return {			false,		4,	DXGI_FORMAT_B8G8R8A8_UNORM,			DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
+			case TextureFormat::SRGBA: return {			false,		4,	DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,	DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+			case TextureFormat::RGBA8: return {			false,		4,	DXGI_FORMAT_R8G8B8A8_UNORM,			DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+			case TextureFormat::RGBA16: return {		false,		8,	DXGI_FORMAT_R16G16B16A16_UNORM,		DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::R11G11B10F: return {	false,		4,	DXGI_FORMAT_R11G11B10_FLOAT,		DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::RGBA16F: return {		false,		8,	DXGI_FORMAT_R16G16B16A16_FLOAT,		DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::RGBA32F: return {		false,		16, DXGI_FORMAT_R32G32B32A32_FLOAT,		DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::RG32F: return {			false,		8,	DXGI_FORMAT_R32G32_FLOAT,			DXGI_FORMAT_UNKNOWN};
+
+			case TextureFormat::D32: return {			false,		4,	DXGI_FORMAT_R32_TYPELESS,			DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::D24S8: return {			false,		4,	DXGI_FORMAT_R24G8_TYPELESS,			DXGI_FORMAT_UNKNOWN};
 			default: ASSERT(false); return {}; 
 		}
 	}

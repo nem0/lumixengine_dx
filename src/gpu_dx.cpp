@@ -1259,9 +1259,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::R32F:
 		case TextureFormat::RG32F:
 		case TextureFormat::SRGB:
-		case TextureFormat::SRGBA: 
-		case TextureFormat::BC1: 
-		case TextureFormat::BC2: 
+		case TextureFormat::SRGBA:
+		case TextureFormat::BC1:
+		case TextureFormat::BC2:
 		case TextureFormat::BC3:
 		case TextureFormat::BC4:
 		case TextureFormat::BC5: break;
@@ -1269,9 +1269,10 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::RG8:
 		case TextureFormat::R16:
 		case TextureFormat::RGBA16:
-		case TextureFormat::R16F: 
-		case TextureFormat::RGBA16F: 
-		case TextureFormat::D32: 
+		case TextureFormat::R16F:
+		case TextureFormat::RGBA16F:
+		case TextureFormat::R11G11B10F:
+		case TextureFormat::D32:
 		case TextureFormat::D24S8: ASSERT(no_mips); break;
 		default: ASSERT(false); return false;
 	}
