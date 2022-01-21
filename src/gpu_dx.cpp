@@ -238,6 +238,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 
 struct D3D {
 	bool initialized = false;
+	bool vsync = true;
 
 	struct FrameBuffer {
 		ID3D11DepthStencilView* depth_stencil = nullptr;
@@ -581,6 +582,8 @@ bool init(void* hwnd, InitFlags flags) {
 		ASSERT(false);
 		return false;
 	}
+
+	d3d->vsync = u32(flags & InitFlags::VSYNC);
 
 	bool debug = u32(flags & InitFlags::DEBUG_OUTPUT);
 	#ifdef LUMIX_DEBUG
@@ -1033,7 +1036,7 @@ u32 swapBuffers()
 	for (auto& window : d3d->windows) {
 		if (!window.handle) continue;
 
-		window.swapchain->Present(1, 0);
+		window.swapchain->Present(d3d->vsync ? 1 : 0, 0);
 
 		RECT rect;
 		GetClientRect((HWND)window.handle, &rect);
