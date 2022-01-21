@@ -772,6 +772,14 @@ struct D3D {
 
 static Local<D3D> d3d;
 
+void memoryBarrier(MemoryBarrierType type, BufferHandle buffer) {
+	D3D12_RESOURCE_BARRIER barrier;
+	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrier.UAV.pResource = buffer->resource;
+	d3d->cmd_list->ResourceBarrier(1, &barrier);
+}
+
 void Frame::begin() {
 	wait();
 	query_buffer->Map(0, nullptr, (void**)&query_buffer_ptr);
@@ -1025,6 +1033,7 @@ void update(TextureHandle texture, u32 mip, u32 x, u32 y, u32 z, u32 w, u32 h, T
 	}
 	desc.Width = w;
 	desc.Height = h;
+	desc.MipLevels = 1;
 
 	u32 num_rows;
 	u64 total_bytes;
@@ -2207,7 +2216,7 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	}
 }
 
-void drawIndirect(DataType index_type) {
+void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	ASSERT(d3d->current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -2258,7 +2267,7 @@ void drawIndirect(DataType index_type) {
 		return signature;
 	}();
 
-	d3d->cmd_list->ExecuteIndirect(signature, 1, d3d->current_indirect_buffer->resource, 0, nullptr, 0);
+	d3d->cmd_list->ExecuteIndirect(signature, 1, d3d->current_indirect_buffer->resource, indirect_buffer_offset, nullptr, 0);
 }
 
 void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType index_type) {

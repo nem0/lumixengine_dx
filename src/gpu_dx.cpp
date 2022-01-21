@@ -91,7 +91,7 @@ struct Buffer {
 	ID3D11UnorderedAccessView* uav = nullptr;
 	u8* mapped_ptr = nullptr;
 	bool is_constant_buffer = false;
-	u32 bound_to_output = 0; 
+	u32 bound_to_output = 0xffFFffFF; 
 };
 
 struct Texture {
@@ -913,6 +913,8 @@ void unmap(BufferHandle buffer)
 	buffer->mapped_ptr = nullptr;
 }
 
+void memoryBarrier(MemoryBarrierType, BufferHandle) {}
+
 bool getMemoryStats(MemoryStats& stats) { return false; }
 
 void setCurrentWindow(void* window_handle)
@@ -1626,19 +1628,22 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, BindShaderBufferFl
 {
 	if(buffer) {
 		Buffer& b = *buffer;
-		if (u32(flags & BindShaderBufferFlags::OUTPUT) && b.uav) {
-			d3d->device_ctx->CSSetUnorderedAccessViews(binding_point, 1, &b.uav, nullptr);
-			b.bound_to_output = binding_point;
-			d3d->bound_uavs[binding_point] = buffer;
+		if (u32(flags & BindShaderBufferFlags::OUTPUT)) {
+			ASSERT(b.uav);
+			if (b.uav) {
+				d3d->device_ctx->CSSetUnorderedAccessViews(binding_point, 1, &b.uav, nullptr);
+				b.bound_to_output = binding_point;
+				d3d->bound_uavs[binding_point] = buffer;
+			}
 		}
 		else {
-			if (b.bound_to_output) {
+			if (b.bound_to_output != 0xffFFffFF) {
 				if (d3d->bound_uavs[b.bound_to_output] == buffer) {
 					ID3D11UnorderedAccessView* uav = nullptr;
 					d3d->device_ctx->CSSetUnorderedAccessViews(b.bound_to_output, 1, &uav, nullptr);
 					d3d->bound_uavs[b.bound_to_output] = 0;
 				}
-				b.bound_to_output = 0;
+				b.bound_to_output = 0xffFFffFF;
 			}
 
 			d3d->device_ctx->CSSetShaderResources(binding_point, 1, &b.srv);
@@ -1667,7 +1672,7 @@ void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t siz
 	d3d->device_ctx->CSSetConstantBuffers1(index, 1, &b, &first, &num);
 }
 
-void drawIndirect(DataType index_type) {
+void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	DXGI_FORMAT dxgi_index_type;
 	switch(index_type) {
 		case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; break;
@@ -1681,7 +1686,7 @@ void drawIndirect(DataType index_type) {
 	ID3D11Buffer* indirect_b = d3d->current_indirect_buffer->buffer;
 	d3d->device_ctx->IASetIndexBuffer(index_b, dxgi_index_type, 0);
 	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	d3d->device_ctx->DrawIndexedInstancedIndirect(indirect_b, 0);
+	d3d->device_ctx->DrawIndexedInstancedIndirect(indirect_b, indirect_buffer_offset);
 }
 
 void bindIndirectBuffer(BufferHandle handle) {
