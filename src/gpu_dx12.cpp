@@ -768,6 +768,7 @@ struct D3D {
 	HeapAllocator rtv_heap;
 	HeapAllocator ds_heap;
 	ShaderCompilerDX12 shader_compiler;
+	bool vsync = true;
 };
 
 static Local<D3D> d3d;
@@ -1287,7 +1288,7 @@ static bool createSwapchain(HWND hwnd, D3D::Window& window) {
 	sd.Width = window.size.x;
 	sd.Height = window.size.y;
 	sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+	sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (d3d->vsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
 	sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 	sd.SampleDesc.Count = 1;
 	sd.SampleDesc.Quality = 0;
@@ -1325,6 +1326,7 @@ bool init(void* hwnd, InitFlags flags) {
 	debug = true;
 #endif
 
+	d3d->vsync = u32(flags & InitFlags::VSYNC);
 	d3d->thread = GetCurrentThreadId();
 	ShInitialize();
 
@@ -1668,7 +1670,7 @@ u32 swapBuffers() {
 				res->Release();
 			}
 
-			HRESULT hr = window.swapchain->ResizeBuffers(0, size.x, size.y, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+			HRESULT hr = window.swapchain->ResizeBuffers(0, size.x, size.y, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (d3d->vsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING));
 			ASSERT(hr == S_OK);
 
 			SIZE_T rtvDescriptorSize = d3d->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -1691,7 +1693,12 @@ u32 swapBuffers() {
 	for (auto& window : d3d->windows) {
 		if (!window.handle) continue;
 
-		window.swapchain->Present(1, 0);
+		if (d3d->vsync) {
+			window.swapchain->Present(1, 0);
+		}
+		else {
+			window.swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+		}
 
 		const UINT current_idx = window.swapchain->GetCurrentBackBufferIndex();
 		switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
