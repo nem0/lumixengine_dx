@@ -39,10 +39,8 @@
 #pragma comment(lib, "spirv-cross-glsl.lib")
 #pragma comment(lib, "spirv-cross-hlsl.lib")
 
-#ifdef LUMIX_DEBUG
-	#define USE_PIX
-	#pragma comment(lib, "WinPixEventRuntime.lib")
-#endif
+#define USE_PIX
+#pragma comment(lib, "WinPixEventRuntime.lib")
 #include "pix3.h"
 
 namespace Lumix {

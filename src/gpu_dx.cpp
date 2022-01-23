@@ -1666,14 +1666,23 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, BindShaderBufferFl
 }
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
-	ASSERT(buffer);
-	ID3D11Buffer* b = buffer->buffer;
-	ASSERT(offset % 16 == 0);
-	const UINT first = (UINT)offset / 16;
-	const UINT num = ((UINT)size + 255) / 256 * 16;
-	d3d->device_ctx->VSSetConstantBuffers1(index, 1, &b, &first, &num);
-	d3d->device_ctx->PSSetConstantBuffers1(index, 1, &b, &first, &num);
-	d3d->device_ctx->CSSetConstantBuffers1(index, 1, &b, &first, &num);
+	if (buffer) {
+		ID3D11Buffer* b = buffer->buffer;
+		ASSERT(offset % 16 == 0);
+		const UINT first = (UINT)offset / 16;
+		const UINT num = ((UINT)size + 255) / 256 * 16;
+		d3d->device_ctx->VSSetConstantBuffers1(index, 1, &b, &first, &num);
+		d3d->device_ctx->PSSetConstantBuffers1(index, 1, &b, &first, &num);
+		d3d->device_ctx->CSSetConstantBuffers1(index, 1, &b, &first, &num);
+	}
+	else {
+		const UINT first = 0;
+		const UINT num = ((UINT)size + 255) / 256 * 16;
+		ID3D11Buffer* b = nullptr;
+		d3d->device_ctx->VSSetConstantBuffers1(index, 1, &b, &first, &num);
+		d3d->device_ctx->PSSetConstantBuffers1(index, 1, &b, &first, &num);
+		d3d->device_ctx->CSSetConstantBuffers1(index, 1, &b, &first, &num);
+	}
 }
 
 void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
