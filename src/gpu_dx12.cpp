@@ -49,7 +49,8 @@ namespace gpu {
 static constexpr u32 NUM_BACKBUFFERS = 3;
 static constexpr u32 SCRATCH_BUFFER_SIZE = 8 * 1024 * 1024;
 static constexpr u32 MAX_DESCRIPTORS = 128 * 1024;
-static constexpr u32 QUERY_COUNT = 2048;
+static constexpr u32 TIMESTAMP_QUERY_COUNT = 2048;
+static constexpr u32 STATS_QUERY_COUNT = 128;
 static constexpr u32 INVALID_HEAP_ID = 0xffFFffFF;
 
 template <int N> static void toWChar(WCHAR (&out)[N], const char* in) {
@@ -109,8 +110,10 @@ int getSize(AttributeType type) {
 }
 
 struct Query {
+	u64 result = 0;
 	u32 idx;
-	u64 timestamp = 0;
+	QueryType type;
+	bool ready;
 };
 
 struct Program {
@@ -649,6 +652,7 @@ struct Frame {
 		: to_release(allocator)
 		, to_heap_release(allocator)
 		, to_resolve(allocator)
+		, to_resolve_stats(allocator)
 	{}
 
 	void clear();
@@ -662,7 +666,8 @@ struct Frame {
 		scratch_buffer->Map(0, nullptr, (void**)&scratch_buffer_begin);
 		scratch_buffer_ptr = scratch_buffer_begin;
 
-		query_buffer = createBuffer(device, nullptr, sizeof(u64) * QUERY_COUNT, D3D12_HEAP_TYPE_READBACK);
+		timestamp_query_buffer = createBuffer(device, nullptr, sizeof(u64) * TIMESTAMP_QUERY_COUNT, D3D12_HEAP_TYPE_READBACK);
+		stats_query_buffer = createBuffer(device, nullptr, sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS) * STATS_QUERY_COUNT, D3D12_HEAP_TYPE_READBACK);
 	
 
 		return true;
@@ -680,12 +685,19 @@ struct Frame {
 
 	void begin();
 
-	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12QueryHeap* query_heap) {
-		query_buffer->Unmap(0, nullptr);
+	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12QueryHeap* timestamp_query_heap, ID3D12QueryHeap* stats_query_heap) {
+		timestamp_query_buffer->Unmap(0, nullptr);
 		for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
 			QueryHandle q = to_resolve[i];
-			cmd_list->ResolveQueryData(query_heap, D3D12_QUERY_TYPE_TIMESTAMP, q->idx, 1, query_buffer, i * 8);
+			cmd_list->ResolveQueryData(timestamp_query_heap, D3D12_QUERY_TYPE_TIMESTAMP, q->idx, 1, timestamp_query_buffer, i * 8);
 		}
+
+		stats_query_buffer->Unmap(0, nullptr);
+		for (u32 i = 0, c = to_resolve_stats.size(); i < c; ++i) {
+			QueryHandle q = to_resolve_stats[i];
+			cmd_list->ResolveQueryData(stats_query_heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, q->idx, 1, stats_query_buffer, i * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+		}
+
 		HRESULT hr = cmd_list->Close();
 		ASSERT(hr == S_OK);
 		hr = cmd_queue->Wait(fence, fence_value);
@@ -706,8 +718,11 @@ struct Frame {
 	ID3D12Fence* fence = nullptr;
 	u64 fence_value = 0;
 	Array<Query*> to_resolve;
-	ID3D12Resource* query_buffer;
-	u8* query_buffer_ptr;
+	Array<Query*> to_resolve_stats;
+	ID3D12Resource* timestamp_query_buffer;
+	ID3D12Resource* stats_query_buffer;
+	u8* timestamp_query_buffer_ptr;
+	u8* stats_query_buffer_ptr;
 };
 
 struct SRV {
@@ -760,8 +775,10 @@ struct D3D {
 	HMODULE d3d_dll;
 	HMODULE dxgi_dll;
 	HeapAllocator srv_heap;
-	ID3D12QueryHeap* query_heap;
-	u32 query_count = 0;
+	ID3D12QueryHeap* timestamp_query_heap;
+	ID3D12QueryHeap* stats_query_heap;
+	u32 timestamp_query_count = 0;
+	u32 stats_query_count = 0;
 	SamplerAllocator sampler_heap;
 	HeapAllocator rtv_heap;
 	HeapAllocator ds_heap;
@@ -781,13 +798,24 @@ void memoryBarrier(MemoryBarrierType type, BufferHandle buffer) {
 
 void Frame::begin() {
 	wait();
-	query_buffer->Map(0, nullptr, (void**)&query_buffer_ptr);
+	timestamp_query_buffer->Map(0, nullptr, (void**)&timestamp_query_buffer_ptr);
+	stats_query_buffer->Map(0, nullptr, (void**)&stats_query_buffer_ptr);
 
 	for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
 		QueryHandle q = to_resolve[i];
-		memcpy(&q->timestamp, query_buffer_ptr + i * 8, sizeof(q->timestamp));
+		memcpy(&q->result, timestamp_query_buffer_ptr + i * 8, sizeof(q->result));
+		q->ready = true;
 	}
 	to_resolve.clear();
+
+	for (u32 i = 0, c = to_resolve_stats.size(); i < c; ++i) {
+		QueryHandle q = to_resolve_stats[i];
+		D3D12_QUERY_DATA_PIPELINE_STATISTICS stats;
+		memcpy(&stats, stats_query_buffer_ptr + i * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS), sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+		q->result = stats.CInvocations;
+		q->ready = true;
+	}
+	to_resolve_stats.clear();
 
 	for (IUnknown* res : to_release) res->Release();
 	for (u32 i : to_heap_release) d3d->srv_heap.free(i);
@@ -804,7 +832,8 @@ void Frame::clear() {
 	to_heap_release.clear();
 
 	scratch_buffer->Release();
-	query_buffer->Release();
+	timestamp_query_buffer->Release();
+	stats_query_buffer->Release();
 }
 
 
@@ -950,13 +979,27 @@ static void try_load_renderdoc() {
 	// FreeLibrary(lib);
 }
 
-QueryHandle createQuery() {
+QueryHandle createQuery(QueryType type) {
 	checkThread();
-	ASSERT(d3d->query_count < QUERY_COUNT);
-	Query* q = LUMIX_NEW(d3d->allocator, Query);
-	q->idx = d3d->query_count;
-	++d3d->query_count;
-	return q;
+	switch(type) {
+		case QueryType::STATS: {
+			ASSERT(d3d->stats_query_count < STATS_QUERY_COUNT);
+			Query* q = LUMIX_NEW(d3d->allocator, Query);
+			q->idx = d3d->stats_query_count;
+			q->type = type;
+			++d3d->stats_query_count;
+			return q;
+		}
+		case QueryType::TIMESTAMP: {
+			ASSERT(d3d->timestamp_query_count < TIMESTAMP_QUERY_COUNT);
+			Query* q = LUMIX_NEW(d3d->allocator, Query);
+			q->type = type;
+			q->idx = d3d->timestamp_query_count;
+			++d3d->timestamp_query_count;
+			return q;
+		}
+		default: ASSERT(false); return INVALID_QUERY;
+	}
 }
 
 void startCapture() {
@@ -994,8 +1037,6 @@ void destroy(TextureHandle texture) {
 
 void destroy(QueryHandle query) {
 	checkThread();
-	// frame should not have a pointer to query, because higher level destroys all queries at once on shutdown
-	ASSERT(query->timestamp); 
 	LUMIX_DELETE(d3d->allocator, query);
 }
 
@@ -1145,12 +1186,26 @@ void readTexture(TextureHandle texture, u32 mip, Span<u8> buf) {
 	ASSERT(false);
 }
 
+void beginQuery(QueryHandle query) {
+	checkThread();
+	ASSERT(query);
+	query->ready = false;
+	d3d->cmd_list->BeginQuery(d3d->stats_query_heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, query->idx);
+}
+
+void endQuery(QueryHandle query) {
+	checkThread();
+	ASSERT(query);
+	d3d->frame->to_resolve_stats.push(query);
+	d3d->cmd_list->EndQuery(d3d->stats_query_heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, query->idx);
+}
+
 void queryTimestamp(QueryHandle query) {
 	checkThread();
 	ASSERT(query);
-	query->timestamp = 0;
+	query->ready = false;
 	d3d->frame->to_resolve.push(query);
-	d3d->cmd_list->EndQuery(d3d->query_heap, D3D12_QUERY_TYPE_TIMESTAMP, query->idx);
+	d3d->cmd_list->EndQuery(d3d->timestamp_query_heap, D3D12_QUERY_TYPE_TIMESTAMP, query->idx);
 }
 
 u64 getQueryFrequency() {
@@ -1160,14 +1215,14 @@ u64 getQueryFrequency() {
 u64 getQueryResult(QueryHandle query) {
 	checkThread();
 	ASSERT(query);
-	ASSERT(query->timestamp);
-	return query->timestamp;
+	ASSERT(query->ready);
+	return query->result;
 }
 
 bool isQueryReady(QueryHandle query) {
 	checkThread();
 	ASSERT(query);
-	return query->timestamp != 0;
+	return query->ready;
 }
 
 void preinit(IAllocator& allocator, bool load_renderdoc) {
@@ -1195,7 +1250,8 @@ void shutdown() {
 	}
 	
 	d3d->root_signature->Release();
-	d3d->query_heap->Release();
+	d3d->timestamp_query_heap->Release();
+	d3d->stats_query_heap->Release();
 	d3d->cmd_queue->Release();
 	d3d->cmd_list->Release();
 	if(d3d->debug) d3d->debug->Release();
@@ -1417,7 +1473,8 @@ bool init(void* hwnd, InitFlags flags) {
 	if (d3d->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, d3d->frames[0].cmd_allocator, NULL, IID_PPV_ARGS(&d3d->cmd_list)) != S_OK) return false;
 	d3d->cmd_list->Close();
 
-	d3d->frame->query_buffer->Map(0, nullptr, (void**)&d3d->frame->query_buffer_ptr);
+	d3d->frame->timestamp_query_buffer->Map(0, nullptr, (void**)&d3d->frame->timestamp_query_buffer_ptr);
+	d3d->frame->stats_query_buffer->Map(0, nullptr, (void**)&d3d->frame->stats_query_buffer_ptr);
 	d3d->frame->cmd_allocator->Reset();
 	d3d->cmd_list->Reset(d3d->frame->cmd_allocator, nullptr);
 	d3d->cmd_list->SetGraphicsRootSignature(d3d->root_signature);
@@ -1435,14 +1492,23 @@ bool init(void* hwnd, InitFlags flags) {
 
 	d3d->shader_compiler.load(".shader_cache_dx");
 
-	D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
-	queryHeapDesc.Count = QUERY_COUNT;
-	queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-	if (!d3d->device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d->query_heap)) == S_OK) return false;
-	HRESULT freq_hr = d3d->cmd_queue->GetTimestampFrequency(&d3d->query_frequency);
-	if (FAILED(freq_hr)) {
-		logError("failed to get timestamp frequency, GPU timing will most likely be wrong");
-		d3d->query_frequency = 1'000'000'000;
+	{
+		D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
+		queryHeapDesc.Count = TIMESTAMP_QUERY_COUNT;
+		queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+		if (!d3d->device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d->timestamp_query_heap)) == S_OK) return false;
+		HRESULT freq_hr = d3d->cmd_queue->GetTimestampFrequency(&d3d->query_frequency);
+		if (FAILED(freq_hr)) {
+			logError("failed to get timestamp frequency, GPU timing will most likely be wrong");
+			d3d->query_frequency = 1'000'000'000;
+		}
+	}
+
+	{
+		D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
+		queryHeapDesc.Count = STATS_QUERY_COUNT;
+		queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
+		if (!d3d->device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d->stats_query_heap)) == S_OK) return false;
 	}
 
 	return true;
@@ -1634,7 +1700,7 @@ u32 swapBuffers() {
 		switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 	}
 
-	d3d->frame->end(d3d->cmd_queue, d3d->cmd_list, d3d->query_heap);
+	d3d->frame->end(d3d->cmd_queue, d3d->cmd_list, d3d->timestamp_query_heap, d3d->stats_query_heap);
 	const u32 res = u32(d3d->frame - d3d->frames.begin());
 
 	++d3d->frame;

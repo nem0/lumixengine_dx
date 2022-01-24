@@ -131,6 +131,7 @@ struct Query {
 		if (query) query->Release();
 	}
 	ID3D11Query* query;
+	QueryType type;
 };
 
 struct InputLayout {
@@ -343,13 +344,28 @@ static DXGI_FORMAT toDSViewFormat(DXGI_FORMAT format) {
 	return format;
 }
 
-QueryHandle createQuery() {
+void beginQuery(QueryHandle query) {
+	checkThread();
+	d3d->device_ctx->Begin(query->query);
+}
+
+void endQuery(QueryHandle query) {
+	checkThread();
+	d3d->device_ctx->End(query->query);
+}
+
+QueryHandle createQuery(QueryType type) {
 	checkThread();
 
 	Query* q = LUMIX_NEW(d3d->allocator, Query);
 	*q = {};
 	D3D11_QUERY_DESC desc = {};
-	desc.Query = D3D11_QUERY_TIMESTAMP;
+	switch(type) {
+		case QueryType::STATS: desc.Query = D3D11_QUERY_PIPELINE_STATISTICS; break;
+		case QueryType::TIMESTAMP: desc.Query = D3D11_QUERY_TIMESTAMP; break;
+		default: ASSERT(false); break;
+	}
+	q->type = type;
 	d3d->device->CreateQuery(&desc, &q->query);
 	ASSERT(q->query);
 	return { q }; 
@@ -507,9 +523,21 @@ u64 getQueryResult(QueryHandle query) {
 	ASSERT(query);
 	ID3D11Query* q = query->query;
 	u64 time;
-	const HRESULT res = d3d->device_ctx->GetData(q, &time, sizeof(time), 0);
-	ASSERT(res == S_OK);
-	return time;
+	switch(query->type) {
+		case QueryType::TIMESTAMP: {
+			const HRESULT res = d3d->device_ctx->GetData(q, &time, sizeof(time), 0);
+			ASSERT(res == S_OK);
+			return time;
+		}
+		case QueryType::STATS: {
+			D3D11_QUERY_DATA_PIPELINE_STATISTICS stats;
+			const HRESULT res = d3d->device_ctx->GetData(q, &stats, sizeof(stats), 0);
+			ASSERT(res == S_OK);
+			return stats.CInvocations;
+		}
+		default: ASSERT(false); break;
+	}
+	return 0;
 }
 
 bool isQueryReady(QueryHandle query) { 
