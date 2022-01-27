@@ -52,6 +52,8 @@ static constexpr u32 MAX_DESCRIPTORS = 128 * 1024;
 static constexpr u32 TIMESTAMP_QUERY_COUNT = 2048;
 static constexpr u32 STATS_QUERY_COUNT = 128;
 static constexpr u32 INVALID_HEAP_ID = 0xffFFffFF;
+static constexpr u32 SAMPLERS_ROOT_PARAMETER_INDEX = 6;
+static constexpr u32 SRV_ROOT_PARAMETER_INDEX = 7;
 
 template <int N> static void toWChar(WCHAR (&out)[N], const char* in) {
 	const char* c = in;
@@ -206,19 +208,6 @@ struct PSOCache {
 		ASSERT(hr == S_OK);
 		cache.insert(hash, pso);
 		return pso;
-	}
-
-	void set(ID3D12Device* device
-		, ID3D12GraphicsCommandList* cmd_list
-		, StateFlags state
-		, ProgramHandle program
-		, const FrameBuffer& fb
-		, ID3D12RootSignature* root_signature
-		, D3D12_PRIMITIVE_TOPOLOGY_TYPE pt)
-	{
-		if (last) return;
-		ID3D12PipelineState* pso = getPipelineState(device, state, program, fb, root_signature, pt);
-		cmd_list->SetPipelineState(pso);
 	}
 
 	ID3D12PipelineState* getPipelineState(ID3D12Device* device
@@ -783,6 +772,10 @@ struct D3D {
 	HeapAllocator rtv_heap;
 	HeapAllocator ds_heap;
 	ShaderCompilerDX12 shader_compiler;
+	D3D12_GPU_VIRTUAL_ADDRESS uniform_blocks[6];
+	u32 dirty_compute_uniform_blocks = 0;
+	u32 dirty_gfx_uniform_blocks = 0;
+
 	bool vsync = true;
 };
 
@@ -1288,6 +1281,7 @@ ID3D12RootSignature* createRootSignature() {
 		{D3D12_ROOT_PARAMETER_TYPE_CBV, {{0, 0}}, D3D12_SHADER_VISIBILITY_ALL},
 		{D3D12_ROOT_PARAMETER_TYPE_CBV, {{0, 0}}, D3D12_SHADER_VISIBILITY_ALL},
 		{D3D12_ROOT_PARAMETER_TYPE_CBV, {{0, 0}}, D3D12_SHADER_VISIBILITY_ALL},
+		{D3D12_ROOT_PARAMETER_TYPE_CBV, {{0, 0}}, D3D12_SHADER_VISIBILITY_ALL},
 		{D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, {{1, &descRange[1]}}, D3D12_SHADER_VISIBILITY_ALL},
 		{D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, {{1, &descRange[2]}}, D3D12_SHADER_VISIBILITY_ALL},
 		{D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, {{1, &descRange[3]}}, D3D12_SHADER_VISIBILITY_ALL},
@@ -1304,6 +1298,8 @@ ID3D12RootSignature* createRootSignature() {
 	rootParameter[3].Descriptor.ShaderRegister = 3;
 	rootParameter[4].Descriptor.RegisterSpace = 0;
 	rootParameter[4].Descriptor.ShaderRegister = 4;
+	rootParameter[5].Descriptor.RegisterSpace = 0;
+	rootParameter[5].Descriptor.ShaderRegister = 5;
 
 	D3D12_ROOT_SIGNATURE_DESC desc;
 	desc.NumParameters = lengthOf(rootParameter);
@@ -2067,11 +2063,55 @@ void scissor(u32 x, u32 y, u32 w, u32 h) {
 	d3d->cmd_list->RSSetScissorRects(1, &rect);
 }
 
+enum class PipelineType {
+	NONE,
+	COMPUTE,
+	GRAPHICS
+};
+
+static PipelineType g_last_pipeline_type = PipelineType::NONE;
+static ProgramHandle g_last_program = INVALID_PROGRAM;
+
+static void applyGFXUniformBlocks() {
+	if (d3d->dirty_gfx_uniform_blocks == 0) return;
+	for (u32 i = 0; i < 6; ++i) {
+		if (d3d->dirty_gfx_uniform_blocks & (1 << i)) {
+			d3d->cmd_list->SetGraphicsRootConstantBufferView(i, d3d->uniform_blocks[i]);
+		}
+	}
+	d3d->dirty_gfx_uniform_blocks = 0;
+}
+
+static void applyComputeUniformBlocks() {
+	if (d3d->dirty_compute_uniform_blocks == 0) return;
+	for (u32 i = 0; i < 6; ++i) {
+		if (d3d->dirty_compute_uniform_blocks & (1 << i)) {
+			d3d->cmd_list->SetComputeRootConstantBufferView(i, d3d->uniform_blocks[i]);
+		}
+	}
+	d3d->dirty_compute_uniform_blocks = 0;
+}
+
+static void setPipelineStateCompute() {
+	if (g_last_pipeline_type != PipelineType::COMPUTE || g_last_program != d3d->current_program) {
+		d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineStateCompute(d3d->device, d3d->root_signature, d3d->current_program));
+		g_last_pipeline_type = PipelineType::COMPUTE;
+		g_last_program = d3d->current_program;
+	}
+	applyComputeUniformBlocks();
+}
+
+static void setPipelineStateGraphics(D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt) {
+	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt));
+	g_last_pipeline_type = PipelineType::GRAPHICS;
+	applyGFXUniformBlocks();
+}
+
 void drawTrianglesInstancedInternal(u32 offset, u32 indices_count, u32 instances_count, DataType index_type) {
 	ASSERT(d3d->current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d3d->pso_cache.set(d3d->device, d3d->cmd_list, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt);
+	setPipelineStateGraphics(ptt);
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2097,12 +2137,12 @@ void drawTrianglesInstancedInternal(u32 offset, u32 indices_count, u32 instances
 
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-		d3d->cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d->cmd_list->SetGraphicsRootDescriptorTable(SAMPLERS_ROOT_PARAMETER_INDEX, samplers);
 		d3d->dirty_samplers = false;
 	}
 	
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-	d3d->cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+	d3d->cmd_list->SetGraphicsRootDescriptorTable(SRV_ROOT_PARAMETER_INDEX, srv);
 
 	d3d->cmd_list->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
@@ -2134,17 +2174,17 @@ void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_co
 			break;
 		default: ASSERT(0); break;
 	}
-	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt));
+	setPipelineStateGraphics(ptt);
 	d3d->cmd_list->IASetPrimitiveTopology(pt);
 
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-		d3d->cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d->cmd_list->SetGraphicsRootDescriptorTable(SAMPLERS_ROOT_PARAMETER_INDEX, samplers);
 		d3d->dirty_samplers = false;
 	}
 	
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-	d3d->cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+	d3d->cmd_list->SetGraphicsRootDescriptorTable(SRV_ROOT_PARAMETER_INDEX, srv);
 
 	d3d->cmd_list->DrawInstanced(indices_count, instances_count, 0, 0);
 }
@@ -2173,17 +2213,17 @@ void drawArrays(PrimitiveType type, u32 offset, u32 count) {
 		default: ASSERT(0); break;
 	}
 
-	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt));
+	setPipelineStateGraphics(ptt);
 	d3d->cmd_list->IASetPrimitiveTopology(pt);
 
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-		d3d->cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d->cmd_list->SetGraphicsRootDescriptorTable(SAMPLERS_ROOT_PARAMETER_INDEX, samplers);
 		d3d->dirty_samplers = false;
 	}
 
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-	d3d->cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+	d3d->cmd_list->SetGraphicsRootDescriptorTable(SRV_ROOT_PARAMETER_INDEX, srv);
 
 	d3d->cmd_list->DrawInstanced(count, 1, offset, 0);
 }
@@ -2209,17 +2249,19 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, BindShaderBufferFl
 }
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
+	ASSERT(index < lengthOf(d3d->uniform_blocks));
 	if (buffer) {
 		ID3D12Resource* b = buffer->resource;
 		ASSERT(b);
-		d3d->cmd_list->SetGraphicsRootConstantBufferView(index, b->GetGPUVirtualAddress() + offset);
-		d3d->cmd_list->SetComputeRootConstantBufferView(index, b->GetGPUVirtualAddress() + offset);
+		d3d->uniform_blocks[index] = b->GetGPUVirtualAddress() + offset;
 	} else {
 		D3D12_GPU_VIRTUAL_ADDRESS dummy = {};
-		d3d->cmd_list->SetGraphicsRootConstantBufferView(index, dummy);
-		d3d->cmd_list->SetComputeRootConstantBufferView(index, dummy);
+		d3d->uniform_blocks[index] = dummy;
 	}
+	d3d->dirty_compute_uniform_blocks |= 1 << index;
+	d3d->dirty_gfx_uniform_blocks |= 1 << index;
 }
+
 
 void bindIndirectBuffer(BufferHandle handle) {
 	d3d->current_indirect_buffer = handle;
@@ -2232,18 +2274,18 @@ void bindIndexBuffer(BufferHandle handle) {
 
 void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
 	ASSERT(d3d->current_program);
-	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineStateCompute(d3d->device, d3d->root_signature, d3d->current_program));
+	setPipelineStateCompute();
 	
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-		d3d->cmd_list->SetComputeRootDescriptorTable(5, samplers);
+		d3d->cmd_list->SetComputeRootDescriptorTable(SAMPLERS_ROOT_PARAMETER_INDEX, samplers);
 		d3d->dirty_samplers = false;
 	}
 
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
 
-	d3d->cmd_list->SetComputeRootDescriptorTable(6, srv);
-	d3d->cmd_list->SetComputeRootDescriptorTable(7, srv);
+	d3d->cmd_list->SetComputeRootDescriptorTable(SRV_ROOT_PARAMETER_INDEX, srv);
+	d3d->cmd_list->SetComputeRootDescriptorTable(SRV_ROOT_PARAMETER_INDEX + 1, srv);
 	d3d->cmd_list->Dispatch(num_groups_x, num_groups_y, num_groups_z);
 }
 
@@ -2291,8 +2333,7 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	ASSERT(d3d->current_program);
 	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt));
+	setPipelineStateGraphics(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2318,12 +2359,12 @@ void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-		d3d->cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
+		d3d->cmd_list->SetGraphicsRootDescriptorTable(SAMPLERS_ROOT_PARAMETER_INDEX, samplers);
 		d3d->dirty_samplers = false;
 	}
 	
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
-	d3d->cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+	d3d->cmd_list->SetGraphicsRootDescriptorTable(SRV_ROOT_PARAMETER_INDEX, srv);
 
 	static ID3D12CommandSignature* signature = [&]() {
 		D3D12_INDIRECT_ARGUMENT_DESC arg_desc = {};
@@ -2369,7 +2410,7 @@ void drawElements(PrimitiveType primitive_type, u32 offset_bytes, u32 count, Dat
 		default: ASSERT(0); break;
 	}
 
-	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt));
+	setPipelineStateGraphics(ptt);
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2397,8 +2438,8 @@ void drawElements(PrimitiveType primitive_type, u32 offset_bytes, u32 count, Dat
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
 
-	d3d->cmd_list->SetGraphicsRootDescriptorTable(5, samplers);
-	d3d->cmd_list->SetGraphicsRootDescriptorTable(6, srv);
+	d3d->cmd_list->SetGraphicsRootDescriptorTable(SAMPLERS_ROOT_PARAMETER_INDEX, samplers);
+	d3d->cmd_list->SetGraphicsRootDescriptorTable(SRV_ROOT_PARAMETER_INDEX, srv);
 
 	d3d->cmd_list->DrawIndexedInstanced(count, 1, 0, 0, 0);
 }

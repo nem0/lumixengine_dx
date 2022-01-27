@@ -261,6 +261,12 @@ struct D3D {
 		ID3D11BlendState* bs;
 	};
 
+	struct UniformBlock {
+		ID3D11Buffer* buffer;
+		UINT offset;
+		UINT size;
+	};
+
 	D3D(IAllocator& allocator) 
 		: allocator(allocator)
 		, state_cache(allocator)
@@ -286,6 +292,9 @@ struct D3D {
 	Window windows[64];
 	Window* current_window = windows;
 	ID3D11SamplerState* samplers[2*2*2*2*2];
+	UniformBlock uniform_blocks[6];
+	u32 dirty_compute_uniform_blocks = 0;
+	u32 dirty_gfx_uniform_blocks = 0;
 
 	FrameBuffer current_framebuffer;
 
@@ -1608,6 +1617,34 @@ void scissor(u32 x, u32 y, u32 w, u32 h) {
 	d3d->device_ctx->RSSetScissorRects(1, &r);
 }
 
+static void applyGFXUniformBlocks() {
+	if (d3d->dirty_gfx_uniform_blocks == 0) return;
+
+	for (u32 i = 0; i < lengthOf(d3d->uniform_blocks); ++i) {
+		if (d3d->dirty_gfx_uniform_blocks & (1 << i)) {
+			const D3D::UniformBlock& tmp = d3d->uniform_blocks[i];
+			d3d->device_ctx->VSSetConstantBuffers1(i, 1, &tmp.buffer, &tmp.offset, &tmp.size);
+			d3d->device_ctx->PSSetConstantBuffers1(i, 1, &tmp.buffer, &tmp.offset, &tmp.size);
+			d3d->device_ctx->GSSetConstantBuffers1(i, 1, &tmp.buffer, &tmp.offset, &tmp.size);
+		}
+	}
+
+	d3d->dirty_gfx_uniform_blocks = 0;
+}
+
+static void applyComputeUniformBlocks() {
+	if (d3d->dirty_compute_uniform_blocks == 0) return;
+
+	for (u32 i = 0; i < lengthOf(d3d->uniform_blocks); ++i) {
+		if (d3d->dirty_compute_uniform_blocks & (1 << i)) {
+			const D3D::UniformBlock& tmp = d3d->uniform_blocks[i];
+			d3d->device_ctx->CSSetConstantBuffers1(i, 1, &tmp.buffer, &tmp.offset, &tmp.size);
+		}
+	}
+
+	d3d->dirty_compute_uniform_blocks = 0;
+}
+
 void drawTriangles(u32 bytes_offset, u32 indices_count, DataType index_type) {
 	DXGI_FORMAT dxgi_index_type;
 	switch(index_type) {
@@ -1617,6 +1654,7 @@ void drawTriangles(u32 bytes_offset, u32 indices_count, DataType index_type) {
 
 	ASSERT(d3d->current_index_buffer);
 	ID3D11Buffer* b = d3d->current_index_buffer->buffer;
+	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetIndexBuffer(b, dxgi_index_type, bytes_offset);
 	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	d3d->device_ctx->DrawIndexed(indices_count, 0, 0);
@@ -1631,6 +1669,7 @@ void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_co
 		case PrimitiveType::TRIANGLE_STRIP: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
 		default: ASSERT(false); return;
 	}
+	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetPrimitiveTopology(topology);
 	d3d->device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
 }
@@ -1645,6 +1684,7 @@ void drawArrays(PrimitiveType type, u32 offset, u32 count)
 		case PrimitiveType::TRIANGLE_STRIP: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
 		default: ASSERT(false); return;
 	}
+	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetPrimitiveTopology(topology);
 	d3d->device_ctx->Draw(count, offset);
 }
@@ -1695,22 +1735,21 @@ void bindShaderBuffer(BufferHandle buffer, u32 binding_point, BindShaderBufferFl
 
 void bindUniformBuffer(u32 index, BufferHandle buffer, size_t offset, size_t size) {
 	if (buffer) {
-		ID3D11Buffer* b = buffer->buffer;
 		ASSERT(offset % 16 == 0);
 		const UINT first = (UINT)offset / 16;
 		const UINT num = ((UINT)size + 255) / 256 * 16;
-		d3d->device_ctx->VSSetConstantBuffers1(index, 1, &b, &first, &num);
-		d3d->device_ctx->PSSetConstantBuffers1(index, 1, &b, &first, &num);
-		d3d->device_ctx->CSSetConstantBuffers1(index, 1, &b, &first, &num);
+
+		d3d->uniform_blocks[index].buffer = buffer->buffer;
+		d3d->uniform_blocks[index].offset = first;
+		d3d->uniform_blocks[index].size = num;
 	}
 	else {
-		const UINT first = 0;
-		const UINT num = ((UINT)size + 255) / 256 * 16;
-		ID3D11Buffer* b = nullptr;
-		d3d->device_ctx->VSSetConstantBuffers1(index, 1, &b, &first, &num);
-		d3d->device_ctx->PSSetConstantBuffers1(index, 1, &b, &first, &num);
-		d3d->device_ctx->CSSetConstantBuffers1(index, 1, &b, &first, &num);
+		d3d->uniform_blocks[index].buffer = nullptr;
+		d3d->uniform_blocks[index].offset = 0;
+		d3d->uniform_blocks[index].size = 0;
 	}
+	d3d->dirty_compute_uniform_blocks |= 1 << index;
+	d3d->dirty_gfx_uniform_blocks |= 1 << index;
 }
 
 void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
@@ -1725,6 +1764,7 @@ void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	
 	ID3D11Buffer* index_b = d3d->current_index_buffer->buffer;
 	ID3D11Buffer* indirect_b = d3d->current_indirect_buffer->buffer;
+	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetIndexBuffer(index_b, dxgi_index_type, 0);
 	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	d3d->device_ctx->DrawIndexedInstancedIndirect(indirect_b, indirect_buffer_offset);
@@ -1739,6 +1779,7 @@ void bindIndexBuffer(BufferHandle handle) {
 }
 
 void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
+	applyComputeUniformBlocks();
 	d3d->device_ctx->Dispatch(num_groups_x, num_groups_y, num_groups_z);
 }
 
@@ -1807,6 +1848,7 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 	}
 
 	ID3D11Buffer* b = d3d->current_index_buffer->buffer;
+	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
 	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	d3d->device_ctx->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
@@ -1832,6 +1874,7 @@ void drawElements(PrimitiveType primitive_type, u32 offset, u32 count, DataType 
 
 	ASSERT((offset & (offset_shift - 1)) == 0);
 	ID3D11Buffer* b = d3d->current_index_buffer->buffer;
+	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
 	d3d->device_ctx->IASetPrimitiveTopology(pt);
 	d3d->device_ctx->DrawIndexed(count, offset >> offset_shift, 0);
