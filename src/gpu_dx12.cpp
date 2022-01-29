@@ -2449,9 +2449,9 @@ void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size) {
 	ASSERT(dst);
 	ASSERT(!dst->mapped_ptr);
 	ASSERT(!src->mapped_ptr);
-	D3D12_RESOURCE_STATES state = dst->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
+	dst->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
+	src->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
 	d3d->cmd_list->CopyBufferRegion(dst->resource, dst_offset, src->resource, 0, size);
-	dst->setState(d3d->cmd_list, state);
 }
 
 void update(BufferHandle buffer, const void* data, size_t size) {
@@ -2464,7 +2464,6 @@ void update(BufferHandle buffer, const void* data, size_t size) {
 	UINT64 src_offset = dst - d3d->frame->scratch_buffer_begin;
 	D3D12_RESOURCE_STATES state = buffer->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
 	d3d->cmd_list->CopyBufferRegion(buffer->resource, 0, d3d->frame->scratch_buffer, src_offset, size);
-	buffer->setState(d3d->cmd_list, state);
 
 	d3d->frame->scratch_buffer_ptr += size;
 }
