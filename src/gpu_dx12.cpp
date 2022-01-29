@@ -1416,7 +1416,10 @@ bool init(void* hwnd, InitFlags flags) {
 
 	D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_0;
 	HRESULT hr = api_D3D12CreateDevice(NULL, featureLevel, IID_PPV_ARGS(&d3d->device));
-	if (!SUCCEEDED(hr)) return false;
+	if (!SUCCEEDED(hr)) {
+		logError("DX12 CreateDevice failed.");
+		return false;
+	}
 
 	if (debug) {
 		ID3D12InfoQueue* info_queue;
