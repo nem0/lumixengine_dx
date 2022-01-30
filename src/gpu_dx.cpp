@@ -671,13 +671,14 @@ bool init(void* hwnd, InitFlags flags) {
 	desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 	const u32 create_flags = D3D11_CREATE_DEVICE_SINGLETHREADED | (debug ? D3D11_CREATE_DEVICE_DEBUG : 0);
 	D3D_FEATURE_LEVEL feature_level;
+	D3D_FEATURE_LEVEL wanted_feature_levels[] = { D3D_FEATURE_LEVEL_12_0 };
 	ID3D11DeviceContext* ctx;
 	HRESULT hr = api_D3D11CreateDeviceAndSwapChain(NULL
 		, D3D_DRIVER_TYPE_HARDWARE
 		, NULL
 		, create_flags
-		, NULL
-		, 0
+		, wanted_feature_levels
+		, 1
 		, D3D11_SDK_VERSION
 		, &desc
 		, &d3d->windows[0].swapchain
@@ -685,10 +686,13 @@ bool init(void* hwnd, InitFlags flags) {
 		, &feature_level
 		, &ctx);
 
+	if(!SUCCEEDED(hr)) {
+		logError("D3D11CreateDeviceAndSwapChain failed");
+		return false;
+	}
+
 	ctx->QueryInterface(IID_PPV_ARGS(&d3d->device_ctx));
 	ctx->Release();
-
-	if(!SUCCEEDED(hr)) return false;
 
 	ID3D11Texture2D* rt;
 	hr = d3d->windows[0].swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
