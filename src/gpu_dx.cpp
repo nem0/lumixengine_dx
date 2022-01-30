@@ -1884,13 +1884,14 @@ void drawElements(PrimitiveType primitive_type, u32 offset, u32 count, DataType 
 	d3d->device_ctx->DrawIndexed(count, offset >> offset_shift, 0);
 }
 
-void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size) {
+void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 src_offset, u32 size) {
 	ASSERT(dst);
 	ASSERT(src);
 	ASSERT(!dst->mapped_ptr);
 	ASSERT(!src->mapped_ptr);
 	D3D11_BOX src_box = {};
-	src_box.right = size;
+	src_box.left = src_offset;
+	src_box.right = src_offset + size;
 	src_box.bottom = 1;
 	src_box.back = 1;
 	d3d->device_ctx->CopySubresourceRegion(dst->buffer, 0, dst_offset, 0, 0, src->buffer, 0, &src_box);

@@ -2447,14 +2447,14 @@ void drawElements(PrimitiveType primitive_type, u32 offset_bytes, u32 count, Dat
 	d3d->cmd_list->DrawIndexedInstanced(count, 1, 0, 0, 0);
 }
 
-void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 size) {
+void copy(BufferHandle dst, BufferHandle src, u32 dst_offset, u32 src_offset, u32 size) {
 	ASSERT(src);
 	ASSERT(dst);
 	ASSERT(!dst->mapped_ptr);
 	ASSERT(!src->mapped_ptr);
 	dst->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
-	src->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
-	d3d->cmd_list->CopyBufferRegion(dst->resource, dst_offset, src->resource, 0, size);
+	src->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
+	d3d->cmd_list->CopyBufferRegion(dst->resource, dst_offset, src->resource, src_offset, size);
 }
 
 void update(BufferHandle buffer, const void* data, size_t size) {
