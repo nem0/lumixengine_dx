@@ -1858,6 +1858,10 @@ u32 VertexDecl::getStride() const {
 	return stride;
 }
 
+void VertexDecl::computeHash() {
+	hash = crc32(attributes, sizeof(Attribute) * attributes_count);
+}
+
 void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, AttributeType type, u8 flags) {
 	if ((int)attributes_count >= lengthOf(attributes)) {
 		ASSERT(false);
