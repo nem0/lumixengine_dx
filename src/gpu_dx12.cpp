@@ -191,7 +191,7 @@ struct PSOCache {
 	{}
 
 	ID3D12PipelineState* getPipelineStateCompute(ID3D12Device* device, ID3D12RootSignature* root_signature, ProgramHandle program) {
-		const u32 hash = crc32(&program, sizeof(program));
+		const RuntimeHash32 hash(&program, sizeof(program));
 		
 		auto iter = cache.find(hash);
 		if (iter.isValid()) return iter.value();
@@ -222,11 +222,14 @@ struct PSOCache {
 
 		ASSERT(program);
 		Program& p = *program;
-		u32 hash = crc32(&state, sizeof(state));
-		hash = continueCrc32(hash, &program, sizeof(program));
-		hash = continueCrc32(hash, &pt, sizeof(pt));
-		hash = continueCrc32(hash, &fb.ds_format, sizeof(fb.ds_format));
-		hash = continueCrc32(hash, &fb.formats[0], sizeof(fb.formats[0]) * fb.count);
+		RollingHasher hasher;
+		hasher.begin();
+		hasher.update(&state, sizeof(state));
+		hasher.update(&program, sizeof(program));
+		hasher.update(&pt, sizeof(pt));
+		hasher.update(&fb.ds_format, sizeof(fb.ds_format));
+		hasher.update(&fb.formats[0], sizeof(fb.formats[0]) * fb.count);
+		const RuntimeHash32 hash = hasher.end();
 
 		auto iter = cache.find(hash);
 		if (iter.isValid()) {
@@ -370,7 +373,7 @@ struct PSOCache {
 		return pso;
 	}
 
-	HashMap<u32, ID3D12PipelineState*> cache;
+	HashMap<RuntimeHash32, ID3D12PipelineState*> cache;
 	ID3D12PipelineState* last = nullptr;
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE last_pt;
 };
@@ -420,7 +423,7 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 				return true;
 			}
 			if (c > (u32)input.prefixes.length() + decl.attributes_count) {
-				const u32 hash = computeHash(tmp, c);
+				const StableHash hash = computeHash(tmp, c);
 				auto iter = m_cache.find(hash);
 				if (iter.isValid()) {
 					set(type, iter.value().data.data(), iter.value().data.size(), program);
@@ -473,7 +476,7 @@ struct SamplerAllocator {
 	ID3D12DescriptorHeap* heap = nullptr;
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu;
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu;
-	HashMap<u32, u32> sampler_map;
+	HashMap<RuntimeHash32, u32> sampler_map;
 	u32 increment = 0;
 	u32 count = 0;
 	u32 max_count = 0;
@@ -842,7 +845,7 @@ LUMIX_FORCE_INLINE static D3D12_GPU_DESCRIPTOR_HANDLE allocSamplers(SamplerAlloc
 		}
 	}
 
-	const u32 hash = crc32(flags, sizeof(flags[0]) * count);
+	const RuntimeHash32 hash(flags, sizeof(flags[0]) * count);
 	auto iter = heap.sampler_map.find(hash);
 	if (iter.isValid()) {
 		D3D12_GPU_DESCRIPTOR_HANDLE gpu = heap.gpu;
