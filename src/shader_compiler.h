@@ -1,7 +1,7 @@
 #pragma once
 
 #include "engine/allocator.h"
-#include "engine/crc32.h"
+#include "engine/hash.h"
 #include "engine/hash_map.h"
 #include "engine/os.h"
 #include <d3dcompiler.h>

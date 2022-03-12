@@ -3,7 +3,7 @@
 #include "../external/include/SPIRV/GlslangToSpv.h"
 #include "../external/include/spirv_cross/spirv_hlsl.hpp"
 #include "engine/array.h"
-#include "engine/crc32.h"
+#include "engine/hash.h"
 #include "engine/hash_map.h"
 #include "engine/log.h"
 #include "engine/math.h"
