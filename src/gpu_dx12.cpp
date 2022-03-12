@@ -2,7 +2,7 @@
 #include "../external/include/glslang/Public/ShaderLang.h"
 #include "../external/include/spirv_cross/spirv_hlsl.hpp"
 #include "engine/array.h"
-#include "engine/crc32.h"
+#include "engine/hash.h"
 #include "engine/hash_map.h"
 #include "engine/log.h"
 #include "engine/math.h"
@@ -1859,7 +1859,7 @@ u32 VertexDecl::getStride() const {
 }
 
 void VertexDecl::computeHash() {
-	hash = crc32(attributes, sizeof(Attribute) * attributes_count);
+	hash = RuntimeHash32(attributes, sizeof(Attribute) * attributes_count);
 }
 
 void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, AttributeType type, u8 flags) {
@@ -1874,7 +1874,7 @@ void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, Attribu
 	attr.flags = flags;
 	attr.type = type;
 	attr.byte_offset = byte_offset;
-	hash = crc32(attributes, sizeof(Attribute) * attributes_count);
+	hash = RuntimeHash32(attributes, sizeof(Attribute) * attributes_count);
 	++attributes_count;
 }
 
