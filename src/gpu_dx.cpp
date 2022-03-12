@@ -165,7 +165,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 			const u32 c = filter(input, type, tmp);
 			if (c == 0) return true;
 			if (c > (u32)input.prefixes.length() + input.decl.attributes_count) {
-				const StableHash hash = computeHash(tmp, c);
+				const StableHash32 hash = computeHash(tmp, c);
 				auto iter = m_cache.find(hash);
 				if (iter.isValid()) {
 					const ShaderCompiler::CachedShader& s = iter.value();

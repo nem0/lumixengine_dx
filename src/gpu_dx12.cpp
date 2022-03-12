@@ -423,7 +423,7 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 				return true;
 			}
 			if (c > (u32)input.prefixes.length() + decl.attributes_count) {
-				const StableHash hash = computeHash(tmp, c);
+				const StableHash32 hash = computeHash(tmp, c);
 				auto iter = m_cache.find(hash);
 				if (iter.isValid()) {
 					set(type, iter.value().data.data(), iter.value().data.size(), program);

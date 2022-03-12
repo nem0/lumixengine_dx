@@ -234,7 +234,7 @@ struct ShaderCompiler {
 		return false;
 	}
 
-	static StableHash computeHash(const char** srcs, u32 count) {
+	static StableHash32 computeHash(const char** srcs, u32 count) {
 		RollingStableHasher hasher;
 		hasher.begin();
 		for (u32 i = 0; i < count; ++i) {
@@ -243,7 +243,7 @@ struct ShaderCompiler {
 		return hasher.end();
 	}
 
-	ID3DBlob* compile(StableHash hash, const char* src, ShaderType type, const char* name, u32 readonly_bitset, u32 used_bitset) {
+	ID3DBlob* compile(StableHash32 hash, const char* src, ShaderType type, const char* name, u32 readonly_bitset, u32 used_bitset) {
 		ID3DBlob* output = NULL;
 		ID3DBlob* errors = NULL;
 		HRESULT hr = D3DCompile(src,
@@ -281,7 +281,7 @@ struct ShaderCompiler {
 			u32 version = 0;
 			bool success = file.write(&version, sizeof(version));
 			for (auto iter = m_cache.begin(), end = m_cache.end(); iter != end; ++iter) {
-				const StableHash hash = iter.key();
+				const StableHash32 hash = iter.key();
 				const CachedShader& s = iter.value();
 				const u32 size = (u32)s.data.size();
 				success = file.write(&hash, sizeof(hash)) && success;
@@ -305,7 +305,7 @@ struct ShaderCompiler {
 				logError("Could not read ", filename);
 			}
 			ASSERT(version == 0);
-			StableHash hash;
+			StableHash32 hash;
 			while (file.read(&hash, sizeof(hash))) {
 				u32 size;
 				if (file.read(&size, sizeof(size))) {
@@ -359,7 +359,7 @@ struct ShaderCompiler {
 		u32 used_srvs_bitset;
 		u32 readonly_bitset;
 	};
-	HashMap<StableHash, CachedShader> m_cache;
+	HashMap<StableHash32, CachedShader> m_cache;
 };
 
 } // namespace Lumix::gpu
