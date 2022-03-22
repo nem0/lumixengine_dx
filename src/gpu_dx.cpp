@@ -1661,21 +1661,6 @@ static void applyComputeUniformBlocks() {
 	d3d->dirty_compute_uniform_blocks = 0;
 }
 
-void drawTriangles(u32 bytes_offset, u32 indices_count, DataType index_type) {
-	DXGI_FORMAT dxgi_index_type;
-	switch(index_type) {
-		case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; break;
-		case DataType::U16: dxgi_index_type = DXGI_FORMAT_R16_UINT; break;
-	}
-
-	ASSERT(d3d->current_index_buffer);
-	ID3D11Buffer* b = d3d->current_index_buffer->buffer;
-	applyGFXUniformBlocks();
-	d3d->device_ctx->IASetIndexBuffer(b, dxgi_index_type, bytes_offset);
-	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	d3d->device_ctx->DrawIndexed(indices_count, 0, 0);
-}
-
 void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_count) {
 	D3D11_PRIMITIVE_TOPOLOGY topology;
 	switch(type) {
@@ -1855,8 +1840,17 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	d3d->device_ctx->CSSetSamplers(offset, count, samplers);
 }
 
-void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
+void drawIndexedInstanced(PrimitiveType primitive_type, u32 indices_count, u32 instances_count, DataType index_type) {
 	ASSERT(d3d->current_index_buffer);
+	D3D11_PRIMITIVE_TOPOLOGY pt;
+	switch (primitive_type) {
+		case PrimitiveType::TRIANGLES: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
+		case PrimitiveType::TRIANGLE_STRIP: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
+		case PrimitiveType::LINES: pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
+		case PrimitiveType::POINTS: pt = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
+		default: ASSERT(0); break;
+	} 
+
 	DXGI_FORMAT dxgi_index_type;
 	switch(index_type) {
 		case DataType::U32: dxgi_index_type = DXGI_FORMAT_R32_UINT; break;
@@ -1866,11 +1860,11 @@ void drawTrianglesInstanced(u32 indices_count, u32 instances_count, DataType ind
 	ID3D11Buffer* b = d3d->current_index_buffer->buffer;
 	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
-	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	d3d->device_ctx->IASetPrimitiveTopology(pt);
 	d3d->device_ctx->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
 
-void drawElements(PrimitiveType primitive_type, u32 offset, u32 count, DataType index_type) {
+void drawIndexed(PrimitiveType primitive_type, u32 offset, u32 count, DataType index_type) {
 	ASSERT(d3d->current_index_buffer);
 	D3D11_PRIMITIVE_TOPOLOGY pt;
 	switch (primitive_type) {
