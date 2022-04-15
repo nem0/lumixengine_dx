@@ -1478,16 +1478,24 @@ void setState(StateFlags state)
 		desc.ScissorEnable = u64(state & StateFlags::SCISSOR_TEST) != 0;
 		desc.DepthClipEnable = FALSE;
 
-		depthStencilDesc.DepthEnable = u64(state & StateFlags::DEPTH_TEST) != 0;
+		depthStencilDesc.DepthEnable = u64(state & StateFlags::DEPTH_FUNCTION) != 0;
 		depthStencilDesc.DepthWriteMask = u64(state & StateFlags::DEPTH_WRITE) ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-		depthStencilDesc.DepthFunc = u64(state & StateFlags::DEPTH_TEST) ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_ALWAYS;
+		if (u64(state & StateFlags::DEPTH_FN_GREATER)) {
+			depthStencilDesc.DepthFunc = D3D11_COMPARISON_GREATER;
+		}
+		else if (u64(state & StateFlags::DEPTH_FN_EQUAL)) {
+			depthStencilDesc.DepthFunc = D3D11_COMPARISON_EQUAL;
+		}
+		else {
+			depthStencilDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+		}
 
-		const StencilFuncs func = (StencilFuncs)((u64(state) >> 30) & 0xf);
+		const StencilFuncs func = (StencilFuncs)((u64(state) >> 31) & 0xf);
 		depthStencilDesc.StencilEnable = func != StencilFuncs::DISABLE; 
 		if(depthStencilDesc.StencilEnable) {
 
-			depthStencilDesc.StencilReadMask = u8(u64(state) >> 42);
-			depthStencilDesc.StencilWriteMask = u8(u64(state) >> 22);
+			depthStencilDesc.StencilReadMask = u8(u64(state) >> 43);
+			depthStencilDesc.StencilWriteMask = u8(u64(state) >> 23);
 			D3D11_COMPARISON_FUNC dx_func;
 			switch(func) {
 				case StencilFuncs::ALWAYS: dx_func = D3D11_COMPARISON_ALWAYS; break;
@@ -1508,9 +1516,9 @@ void setState(StateFlags state)
 				};
 				return table[(int)op];
 			};
-			const D3D11_STENCIL_OP sfail = toDXOp(StencilOps((u64(state) >> 50) & 0xf));
-			const D3D11_STENCIL_OP zfail = toDXOp(StencilOps((u64(state) >> 54) & 0xf));
-			const D3D11_STENCIL_OP zpass = toDXOp(StencilOps((u64(state) >> 58) & 0xf));
+			const D3D11_STENCIL_OP sfail = toDXOp(StencilOps((u64(state) >> 51) & 0xf));
+			const D3D11_STENCIL_OP zfail = toDXOp(StencilOps((u64(state) >> 55) & 0xf));
+			const D3D11_STENCIL_OP zpass = toDXOp(StencilOps((u64(state) >> 59) & 0xf));
 
 			depthStencilDesc.FrontFace.StencilFailOp = sfail;
 			depthStencilDesc.FrontFace.StencilDepthFailOp = zfail;
@@ -1523,7 +1531,7 @@ void setState(StateFlags state)
 			depthStencilDesc.BackFace.StencilFunc = dx_func;
 		}
 
-		u16 blend_bits = u16(u64(state) >> 6);
+		u16 blend_bits = u16(u64(state) >> 7);
 
 		auto to_dx = [&](BlendFactors factor) -> D3D11_BLEND {
 			static const D3D11_BLEND table[] = {

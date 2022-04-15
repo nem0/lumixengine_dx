@@ -258,15 +258,23 @@ struct PSOCache {
 		// TODO enable/disable scissor
 		desc.RasterizerState.DepthClipEnable = FALSE;
 
-		desc.DepthStencilState.DepthEnable = u64(state & StateFlags::DEPTH_TEST) != 0;
+		desc.DepthStencilState.DepthEnable = u64(state & StateFlags::DEPTH_FUNCTION) != 0;
 		desc.DepthStencilState.DepthWriteMask = u64(state & StateFlags::DEPTH_WRITE) && desc.DepthStencilState.DepthEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-		desc.DepthStencilState.DepthFunc = u64(state & StateFlags::DEPTH_TEST) ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_ALWAYS;
+		if (u64(state & StateFlags::DEPTH_FN_GREATER)) {
+			desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+		}
+		else if (u64(state & StateFlags::DEPTH_FN_EQUAL)) {
+			desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
+		}
+		else {
+			desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+		}
 
-		const StencilFuncs func = (StencilFuncs)((u64(state) >> 30) & 0xf);
+		const StencilFuncs func = (StencilFuncs)((u64(state) >> 31) & 0xf);
 		desc.DepthStencilState.StencilEnable = func != StencilFuncs::DISABLE;
 		if (desc.DepthStencilState.StencilEnable) {
-			desc.DepthStencilState.StencilReadMask = u8(u64(state) >> 42);
-			desc.DepthStencilState.StencilWriteMask = u8(u64(state) >> 22);
+			desc.DepthStencilState.StencilReadMask = u8(u64(state) >> 43);
+			desc.DepthStencilState.StencilWriteMask = u8(u64(state) >> 23);
 			D3D12_COMPARISON_FUNC dx_func;
 			switch (func) {
 				case StencilFuncs::ALWAYS: dx_func = D3D12_COMPARISON_FUNC_ALWAYS; break;
@@ -285,9 +293,9 @@ struct PSOCache {
 					D3D12_STENCIL_OP_DECR};
 				return table[(int)op];
 			};
-			const D3D12_STENCIL_OP sfail = toDXOp(StencilOps((u64(state) >> 50) & 0xf));
-			const D3D12_STENCIL_OP zfail = toDXOp(StencilOps((u64(state) >> 54) & 0xf));
-			const D3D12_STENCIL_OP zpass = toDXOp(StencilOps((u64(state) >> 58) & 0xf));
+			const D3D12_STENCIL_OP sfail = toDXOp(StencilOps((u64(state) >> 51) & 0xf));
+			const D3D12_STENCIL_OP zfail = toDXOp(StencilOps((u64(state) >> 55) & 0xf));
+			const D3D12_STENCIL_OP zpass = toDXOp(StencilOps((u64(state) >> 59) & 0xf));
 
 			desc.DepthStencilState.FrontFace.StencilFailOp = sfail;
 			desc.DepthStencilState.FrontFace.StencilDepthFailOp = zfail;
@@ -300,7 +308,7 @@ struct PSOCache {
 			desc.DepthStencilState.BackFace.StencilFunc = dx_func;
 		}
 
-		const u16 blend_bits = u16(u64(state) >> 6);
+		const u16 blend_bits = u16(u64(state) >> 7);
 
 		auto to_dx = [&](BlendFactors factor) -> D3D12_BLEND {
 			static const D3D12_BLEND table[] = {
