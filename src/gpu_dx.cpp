@@ -811,7 +811,7 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
 	ASSERT(cube);
 	d3d->current_framebuffer.count = 0;
 	d3d->current_framebuffer.depth_stencil = nullptr;
-	if (cube->rtv && (cube->rtv_face != face || cube->rtv_mip) != mip) {
+	if (cube->rtv && (cube->rtv_face != face || cube->rtv_mip != mip)) {
 		cube->rtv->Release();
 		cube->rtv = nullptr;
 	}
@@ -823,6 +823,8 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
 		desc.Texture2DArray.ArraySize = 1;
 		desc.Texture2DArray.FirstArraySlice = face;
 		d3d->device->CreateRenderTargetView((ID3D11Resource*)cube->texture2D, &desc, &cube->rtv);
+		cube->rtv_face = face;
+		cube->rtv_mip = mip;
 	}
 	ASSERT(d3d->current_framebuffer.count < (u32)lengthOf(d3d->current_framebuffer.render_targets));
 	d3d->current_framebuffer.render_targets[d3d->current_framebuffer.count] = cube->rtv;
