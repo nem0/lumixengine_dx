@@ -8,6 +8,11 @@ newoption {
 	description = "do not use any dx backend"
 }
 
+local function setLibDirs()
+	libdirs { "external/lib/win64_" .. binary_api_dir .. "/release"}
+	libdirs { "external/pix/bin/x64" }
+end
+
 if _OPTIONS["nodx"] == nil then
 	project "renderer"
 		files { 
@@ -31,15 +36,19 @@ if _OPTIONS["nodx"] == nil then
 				defines { "LUMIX_DX11" }
 		end
 
+		if _OPTIONS["dynamic-plugins"] then		
+			libdirs { "external/lib/win64_" .. binary_api_dir .. "/release" }
+			configuration {"vs*"}
+				links { "dxguid" }
+			configuration {}
+		end
 
 	if build_studio then
 		project "studio"
-			libdirs { "external/lib/win64" .. "_" .. binary_api_dir .. "/release"}
-			libdirs { "external/pix/bin/x64" }
+			setLibDirs()
 	end
 	if build_app then
 		project "app"
-			libdirs { "external/lib/win64" .. "_" .. binary_api_dir .. "/release"}
-			libdirs { "external/pix/bin/x64" }
+			setLibDirs()
 	end
 end
