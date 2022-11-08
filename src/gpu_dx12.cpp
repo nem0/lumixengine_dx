@@ -101,16 +101,6 @@ static void switchState(ID3D12GraphicsCommandList* cmd_list, ID3D12Resource* res
 	cmd_list->ResourceBarrier(1, &barrier);
 }
 
-int getSize(AttributeType type) {
-	switch (type) {
-		case AttributeType::FLOAT: return 4;
-		case AttributeType::U8: return 1;
-		case AttributeType::I8: return 1;
-		case AttributeType::I16: return 2;
-		default: ASSERT(false); return 0;
-	}
-}
-
 struct Query {
 	u64 result = 0;
 	u32 idx;
@@ -134,6 +124,9 @@ struct Program {
 	u32 attribute_count = 0;
 	u32 readonly_binding_flags = 0xffFFffFF;
 	u32 used_srvs_flags = 0xffFFffFF;
+	StateFlags state;
+	D3D12_PRIMITIVE_TOPOLOGY primitive_topology;
+	D3D12_PRIMITIVE_TOPOLOGY_TYPE primitive_topology_type;
 	#ifdef LUMIX_DEBUG
 		StaticString<64> name;
 	#endif
@@ -211,22 +204,15 @@ struct PSOCache {
 	}
 
 	ID3D12PipelineState* getPipelineState(ID3D12Device* device
-		, StateFlags state
 		, ProgramHandle program
 		, const FrameBuffer& fb
-		, ID3D12RootSignature* root_signature
-		, D3D12_PRIMITIVE_TOPOLOGY_TYPE pt)
+		, ID3D12RootSignature* root_signature)
 	{
-		if (last && last_pt == pt) return last;
-		last_pt = pt;
-
 		ASSERT(program);
 		Program& p = *program;
 		RollingHasher hasher;
 		hasher.begin();
-		hasher.update(&state, sizeof(state));
 		hasher.update(&program, sizeof(program));
-		hasher.update(&pt, sizeof(pt));
 		hasher.update(&fb.ds_format, sizeof(fb.ds_format));
 		hasher.update(&fb.formats[0], sizeof(fb.formats[0]) * fb.count);
 		const RuntimeHash32 hash = hasher.end();
@@ -242,8 +228,9 @@ struct PSOCache {
 		if (p.ps.size() > 0) desc.PS = {p.ps.data(), p.ps.size()};
 		if (p.gs.size() > 0) desc.GS = {p.gs.data(), p.gs.size()};
 
-		desc.PrimitiveTopologyType = pt;
+		desc.PrimitiveTopologyType = program->primitive_topology_type;
 
+		const StateFlags state = program->state;
 		if (u64(state & StateFlags::CULL_BACK)) {
 			desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
 		} else if (u64(state & StateFlags::CULL_FRONT)) {
@@ -383,7 +370,6 @@ struct PSOCache {
 
 	HashMap<RuntimeHash32, ID3D12PipelineState*> cache;
 	ID3D12PipelineState* last = nullptr;
-	D3D12_PRIMITIVE_TOPOLOGY_TYPE last_pt;
 };
 
 struct ShaderCompilerDX12 : ShaderCompiler {
@@ -764,7 +750,6 @@ struct D3D {
 	SRV current_srvs[16];
 	TextureFlags current_sampler_flags[10] = {};
 	bool dirty_samplers = true;
-	StateFlags current_state = StateFlags::NONE;
 	PSOCache pso_cache;
 	Window windows[64];
 	Window* current_window = windows;
@@ -1577,7 +1562,7 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip) {
 	ASSERT(false); // TODO
 }
 
-void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle depth_stencil, FramebufferFlags flags) {
+void setFramebuffer(const TextureHandle* attachments, u32 num, TextureHandle depth_stencil, FramebufferFlags flags) {
 	checkThread();
 	d3d->pso_cache.last = nullptr;
 
@@ -1861,35 +1846,7 @@ TextureHandle allocTextureHandle() {
 	return LUMIX_NEW(d3d->allocator, Texture);
 }
 
-u32 VertexDecl::getStride() const {
-	u32 stride = 0;
-	for (u32 i = 0; i < attributes_count; ++i) {
-		stride += attributes[i].components_count * getSize(attributes[i].type);
-	}
-	return stride;
-}
-
-void VertexDecl::computeHash() {
-	hash = RuntimeHash32(attributes, sizeof(Attribute) * attributes_count);
-}
-
-void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, AttributeType type, u8 flags) {
-	if ((int)attributes_count >= lengthOf(attributes)) {
-		ASSERT(false);
-		return;
-	}
-
-	Attribute& attr = attributes[attributes_count];
-	attr.components_count = components_num;
-	attr.idx = idx;
-	attr.flags = flags;
-	attr.type = type;
-	attr.byte_offset = byte_offset;
-	hash = RuntimeHash32(attributes, sizeof(Attribute) * attributes_count);
-	++attributes_count;
-}
-
-bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const char* debug_name) {
+void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const char* debug_name) {
 	ASSERT(handle);
 
 	const bool is_srgb = u32(flags & TextureFlags::SRGB);
@@ -1923,7 +1880,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::R11G11B10F:
 		case TextureFormat::D32:
 		case TextureFormat::D24S8: ASSERT(no_mips); break;
-		default: ASSERT(false); return false;
+		default: ASSERT(false); return;
 	}
 
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, depth));
@@ -1965,7 +1922,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 	}
 
 	texture.state = compute_write ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_GENERIC_READ;
-	if (d3d->device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, texture.state, clear_val_ptr, IID_PPV_ARGS(&texture.resource)) != S_OK) return false;
+	if (d3d->device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, texture.state, clear_val_ptr, IID_PPV_ARGS(&texture.resource)) != S_OK) return;
 
 	#ifdef LUMIX_DEBUG
 		texture.name = debug_name;
@@ -2043,18 +2000,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		toWChar(tmp, debug_name);
 		texture.resource->SetName(tmp);
 	}
-
-	return true;
 }
 
-void setState(StateFlags state) {
-	if (state != d3d->current_state) {
-		d3d->pso_cache.last = nullptr;
-		const u8 stencil_ref = u8(u64(state) >> 34);
-		d3d->cmd_list->OMSetStencilRef(stencil_ref);
-	}
-	d3d->current_state = state;
-}
+IAllocator& getAllocator() { return d3d->allocator; }
 
 void viewport(u32 x, u32 y, u32 w, u32 h) {
 	D3D12_VIEWPORT vp = {};
@@ -2127,37 +2075,19 @@ static void setPipelineStateCompute() {
 	applyComputeUniformBlocks();
 }
 
-static void setPipelineStateGraphics(D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt) {
-	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_state, d3d->current_program, d3d->current_framebuffer, d3d->root_signature, ptt));
+static void setPipelineStateGraphics() {
+	const u8 stencil_ref = u8(u64(d3d->current_program->state) >> 34);
+	d3d->cmd_list->OMSetStencilRef(stencil_ref);
+
+	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_program, d3d->current_framebuffer, d3d->root_signature));
 	g_last_pipeline_type = PipelineType::GRAPHICS;
 	applyGFXUniformBlocks();
 }
 
-void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_count) {
+void drawArraysInstanced(u32 indices_count, u32 instances_count) {
 	ASSERT(d3d->current_program);
-	D3D12_PRIMITIVE_TOPOLOGY pt;
-	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt;
-	switch (type) {
-		case PrimitiveType::TRIANGLES:
-			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			break;
-		case PrimitiveType::TRIANGLE_STRIP:
-			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			break;
-		case PrimitiveType::LINES:
-			pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-			break;
-		case PrimitiveType::POINTS:
-			pt = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
-			break;
-		default: ASSERT(0); break;
-	}
-	setPipelineStateGraphics(ptt);
-	d3d->cmd_list->IASetPrimitiveTopology(pt);
+	setPipelineStateGraphics();
+	d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
@@ -2171,32 +2101,10 @@ void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_co
 	d3d->cmd_list->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
-void drawArrays(PrimitiveType type, u32 offset, u32 count) {
+void drawArrays(u32 offset, u32 count) {
 	ASSERT(d3d->current_program);
-	D3D12_PRIMITIVE_TOPOLOGY pt;
-	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt;
-	switch (type) {
-		case PrimitiveType::TRIANGLES:
-			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			break;
-		case PrimitiveType::TRIANGLE_STRIP:
-			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			break;
-		case PrimitiveType::LINES:
-			pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-			break;
-		case PrimitiveType::POINTS:
-			pt = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
-			break;
-		default: ASSERT(0); break;
-	}
-
-	setPipelineStateGraphics(ptt);
-	d3d->cmd_list->IASetPrimitiveTopology(pt);
+	setPipelineStateGraphics();
+	d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
@@ -2314,8 +2222,7 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 
 void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	ASSERT(d3d->current_program);
-	D3D12_PRIMITIVE_TOPOLOGY pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-	setPipelineStateGraphics(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
+	setPipelineStateGraphics();
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2337,7 +2244,7 @@ void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	ibv.Format = dxgi_index_type;
 	ibv.SizeInBytes = d3d->current_index_buffer->size;
 	d3d->cmd_list->IASetIndexBuffer(&ibv);
-	d3d->cmd_list->IASetPrimitiveTopology(pt);
+	d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
@@ -2365,31 +2272,10 @@ void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	d3d->cmd_list->ExecuteIndirect(signature, 1, d3d->current_indirect_buffer->resource, indirect_buffer_offset, nullptr, 0);
 }
 
-void drawIndexedInstanced(PrimitiveType primitive_type, u32 indices_count, u32 instances_count, DataType index_type) {
-	D3D12_PRIMITIVE_TOPOLOGY pt;
-	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt;
-	switch (primitive_type) {
-		case PrimitiveType::TRIANGLES:
-			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			break;
-		case PrimitiveType::TRIANGLE_STRIP:
-			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			break;
-		case PrimitiveType::LINES:
-			pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-			break;
-		case PrimitiveType::POINTS:
-			pt = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
-			break;
-		default: ASSERT(0); break;
-	}
+void drawIndexedInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
 
 	ASSERT(d3d->current_program);
-	setPipelineStateGraphics(ptt);
+	setPipelineStateGraphics();
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2411,7 +2297,7 @@ void drawIndexedInstanced(PrimitiveType primitive_type, u32 indices_count, u32 i
 	ibv.Format = dxgi_index_type;
 	ibv.SizeInBytes = indices_count * (1 << offset_shift);
 	d3d->cmd_list->IASetIndexBuffer(&ibv);
-	d3d->cmd_list->IASetPrimitiveTopology(pt);
+	d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 
 	if (d3d->dirty_samplers) {
 		D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
@@ -2425,30 +2311,8 @@ void drawIndexedInstanced(PrimitiveType primitive_type, u32 indices_count, u32 i
 	d3d->cmd_list->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
 
-void drawIndexed(PrimitiveType primitive_type, u32 offset_bytes, u32 count, DataType index_type) {
-	D3D12_PRIMITIVE_TOPOLOGY pt;
-	D3D12_PRIMITIVE_TOPOLOGY_TYPE ptt;
-	switch (primitive_type) {
-		case PrimitiveType::TRIANGLES:
-			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			break;
-		case PrimitiveType::TRIANGLE_STRIP:
-			pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			break;
-		case PrimitiveType::LINES:
-			pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-			break;
-		case PrimitiveType::POINTS:
-			pt = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
-			ptt = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
-			break;
-		default: ASSERT(0); break;
-	}
-
-	setPipelineStateGraphics(ptt);
+void drawIndexed(u32 offset_bytes, u32 count, DataType index_type) {
+	setPipelineStateGraphics();
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2471,7 +2335,7 @@ void drawIndexed(PrimitiveType primitive_type, u32 offset_bytes, u32 count, Data
 	ibv.Format = dxgi_index_type;
 	ibv.SizeInBytes = count * (1 << offset_shift);
 	d3d->cmd_list->IASetIndexBuffer(&ibv);
-	d3d->cmd_list->IASetPrimitiveTopology(pt);
+	d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 
 	D3D12_GPU_DESCRIPTOR_HANDLE samplers = allocSamplers(d3d->sampler_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
 	D3D12_GPU_DESCRIPTOR_HANDLE srv = allocSRV(*d3d->current_program, d3d->srv_heap, d3d->current_srvs, lengthOf(d3d->current_srvs));
@@ -2506,7 +2370,8 @@ void update(BufferHandle buffer, const void* data, size_t size) {
 	d3d->frame->scratch_buffer_ptr += size;
 }
 
-bool createProgram(ProgramHandle program
+void createProgram(ProgramHandle program
+	, StateFlags state
 	, const VertexDecl& decl
 	, const char** srcs
 	, const ShaderType* types
@@ -2519,8 +2384,31 @@ bool createProgram(ProgramHandle program
 	#ifdef LUMIX_DEBUG
 		program->name = name;
 	#endif
+	program->state = state;
+	
+	switch (decl.primitive_type) {
+		case PrimitiveType::NONE:
+		case PrimitiveType::TRIANGLES:
+			program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+			program->primitive_topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			break;
+		case PrimitiveType::TRIANGLE_STRIP:
+			program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+			program->primitive_topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			break;
+		case PrimitiveType::LINES:
+			program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+			program->primitive_topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+			break;
+		case PrimitiveType::POINTS:
+			program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+			program->primitive_topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+			break;
+		default: ASSERT(0); break;
+	}
+
 	ShaderCompiler::Input args { decl, Span(srcs, num), Span(types, num), Span(prefixes, prefixes_count) };
-	return d3d->shader_compiler.compile(decl, args, name, *program);
+	d3d->shader_compiler.compile(decl, args, name, *program);
 }
 
 } // namespace gpu

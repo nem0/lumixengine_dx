@@ -65,7 +65,7 @@ struct Program {
 	ID3D11ComputeShader* cs = nullptr;
 	ID3D11InputLayout* il = nullptr;
 	StateFlags state = StateFlags::NONE;
-	PrimitiveType primitive_type = PrimitiveType::NONE;
+	D3D11_PRIMITIVE_TOPOLOGY primitive_topology;
 	#ifdef LUMIX_DEBUG
 		StaticString<64> name;
 	#endif
@@ -1422,7 +1422,7 @@ void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 IAllocator& getAllocator() { return d3d->allocator; }
 
-void setState(StateFlags state)
+static void setState(StateFlags state)
 {
 	auto iter = d3d->state_cache.find((u64)state);
 	if (!iter.isValid()) {
@@ -1637,31 +1637,16 @@ static void applyComputeUniformBlocks() {
 }
 
 void drawArraysInstanced(u32 indices_count, u32 instances_count) {
-	D3D11_PRIMITIVE_TOPOLOGY topology;
-	switch(d3d->current_program->primitive_type) {
-		case PrimitiveType::LINES: topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
-		case PrimitiveType::POINTS: topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
-		case PrimitiveType::TRIANGLES: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
-		case PrimitiveType::TRIANGLE_STRIP: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
-		default: ASSERT(false); return;
-	}
+	setState(d3d->current_program->state);
 	applyGFXUniformBlocks();
-	d3d->device_ctx->IASetPrimitiveTopology(topology);
+	d3d->device_ctx->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 	d3d->device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
-void drawArrays(u32 offset, u32 count)
-{
-	D3D11_PRIMITIVE_TOPOLOGY topology;
-	switch(d3d->current_program->primitive_type) {
-		case PrimitiveType::LINES: topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
-		case PrimitiveType::POINTS: topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
-		case PrimitiveType::TRIANGLES: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
-		case PrimitiveType::TRIANGLE_STRIP: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
-		default: ASSERT(false); return;
-	}
+void drawArrays(u32 offset, u32 count) {
+	setState(d3d->current_program->state);
 	applyGFXUniformBlocks();
-	d3d->device_ctx->IASetPrimitiveTopology(topology);
+	d3d->device_ctx->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 	d3d->device_ctx->Draw(count, offset);
 }
 
@@ -1740,6 +1725,7 @@ void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	
 	ID3D11Buffer* index_b = d3d->current_index_buffer->buffer;
 	ID3D11Buffer* indirect_b = d3d->current_indirect_buffer->buffer;
+	setState(d3d->current_program->state);
 	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetIndexBuffer(index_b, dxgi_index_type, 0);
 	d3d->device_ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1817,14 +1803,6 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 
 void drawIndexedInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
 	ASSERT(d3d->current_index_buffer);
-	D3D11_PRIMITIVE_TOPOLOGY pt;
-	switch (d3d->current_program->primitive_type) {
-		case PrimitiveType::TRIANGLES: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
-		case PrimitiveType::TRIANGLE_STRIP: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
-		case PrimitiveType::LINES: pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
-		case PrimitiveType::POINTS: pt = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
-		default: ASSERT(0); break;
-	} 
 
 	DXGI_FORMAT dxgi_index_type;
 	switch(index_type) {
@@ -1833,22 +1811,15 @@ void drawIndexedInstanced(u32 indices_count, u32 instances_count, DataType index
 	}
 
 	ID3D11Buffer* b = d3d->current_index_buffer->buffer;
+	setState(d3d->current_program->state);
 	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
-	d3d->device_ctx->IASetPrimitiveTopology(pt);
+	d3d->device_ctx->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 	d3d->device_ctx->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
 
 void drawIndexed(u32 offset, u32 count, DataType index_type) {
 	ASSERT(d3d->current_index_buffer);
-	D3D11_PRIMITIVE_TOPOLOGY pt;
-	switch (d3d->current_program->primitive_type) {
-		case PrimitiveType::TRIANGLES: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
-		case PrimitiveType::TRIANGLE_STRIP: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
-		case PrimitiveType::LINES: pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
-		case PrimitiveType::POINTS: pt = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
-		default: ASSERT(0); break;
-	} 
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -1859,9 +1830,10 @@ void drawIndexed(u32 offset, u32 count, DataType index_type) {
 
 	ASSERT((offset & (offset_shift - 1)) == 0);
 	ID3D11Buffer* b = d3d->current_index_buffer->buffer;
+	setState(d3d->current_program->state);
 	applyGFXUniformBlocks();
 	d3d->device_ctx->IASetIndexBuffer(b, dxgi_index_type, 0);
-	d3d->device_ctx->IASetPrimitiveTopology(pt);
+	d3d->device_ctx->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 	d3d->device_ctx->DrawIndexed(count, offset >> offset_shift, 0);
 }
 
@@ -1903,7 +1875,15 @@ void createProgram(ProgramHandle program, StateFlags state, const VertexDecl& de
 	#endif
 
 	program->state = state;
-	program->primitive_type = decl.primitive_type;
+	switch(decl.primitive_type) {
+		case PrimitiveType::NONE:
+		case PrimitiveType::TRIANGLES: program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
+		case PrimitiveType::LINES: program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
+		case PrimitiveType::POINTS: program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
+		case PrimitiveType::TRIANGLE_STRIP: program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
+		default: ASSERT(false); return;
+	}
+
 	ShaderCompiler::Input args { decl, Span(srcs, num), Span(types, num), Span(prefixes, prefixes_count) };
 
 	d3d->shader_compiler.compile(d3d->device, args, name, *program);
