@@ -21,7 +21,7 @@ if _OPTIONS["nodx"] == nil then
 			"src/**.h",
 			"genie.lua"
 		}
-		excludes { "../../src/renderer/gpu/gpu.cpp" }
+		excludes { "../../src/renderer/gpu/gpu_gl.cpp" }
 
 		if _OPTIONS["dx12"] then
 			includedirs {"external/pix/Include/WinPixEventRuntime", "external/include/dx" }

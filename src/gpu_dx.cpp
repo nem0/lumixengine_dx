@@ -50,16 +50,6 @@ static void toWChar(WCHAR (&out)[N], const char* in)
 	*cout = 0;
 }
 
-int getSize(AttributeType type) {
-	switch(type) {
-		case AttributeType::FLOAT: return 4;
-		case AttributeType::U8: return 1;
-		case AttributeType::I8: return 1;
-		case AttributeType::I16: return 2;
-		default: ASSERT(false); return 0;
-	}
-}
-
 struct Program {
 	~Program() {
 		if (gs) gs->Release();
@@ -74,6 +64,8 @@ struct Program {
 	ID3D11GeometryShader* gs = nullptr;
 	ID3D11ComputeShader* cs = nullptr;
 	ID3D11InputLayout* il = nullptr;
+	StateFlags state = StateFlags::NONE;
+	PrimitiveType primitive_type = PrimitiveType::NONE;
 	#ifdef LUMIX_DEBUG
 		StaticString<64> name;
 	#endif
@@ -846,7 +838,7 @@ void setFramebufferCube(TextureHandle cube, u32 face, u32 mip)
 }
 
 // TODO texture might get destroyed while framebuffer has rtv or dsv to it
-void setFramebuffer(TextureHandle* attachments, u32 num, TextureHandle ds, FramebufferFlags flags) {
+void setFramebuffer(const TextureHandle* attachments, u32 num, TextureHandle ds, FramebufferFlags flags) {
 	ASSERT(num < (u32)lengthOf(d3d->current_framebuffer.render_targets));
 	checkThread();
 
@@ -1239,34 +1231,6 @@ TextureHandle allocTextureHandle()
 	return { t };
 }
 
-u32 VertexDecl::getStride() const {
-	u32 stride = 0;
-	for (u32 i = 0; i < attributes_count; ++i) {
-		stride += attributes[i].components_count * getSize(attributes[i].type);
-	}
-	return stride;
-}
-
-void VertexDecl::computeHash() {
-	hash = RuntimeHash32(attributes, sizeof(Attribute) * attributes_count);
-}
-
-void VertexDecl::addAttribute(u8 idx, u8 byte_offset, u8 components_num, AttributeType type, u8 flags) {
-	if((int)attributes_count >= lengthOf(attributes)) {
-		ASSERT(false);
-		return;
-	}
-
-	Attribute& attr = attributes[attributes_count];
-	attr.components_count = components_num;
-	attr.idx = idx;
-	attr.flags = flags;
-	attr.type = type;
-	attr.byte_offset = byte_offset;
-	hash = RuntimeHash32(attributes, sizeof(Attribute) * attributes_count);
-	++attributes_count;
-}
-
 ID3D11SamplerState* getSampler(TextureFlags flags) {
 	const u32 idx = (u32)flags & 0b11111;
 	if (!d3d->samplers[idx]) {
@@ -1298,7 +1262,7 @@ static bool canGenMips(TextureFormat format) {
 	}
 }
 
-bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const char* debug_name)
+void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const char* debug_name)
 {
 	ASSERT(handle);
 	const bool is_srgb = u32(flags & TextureFlags::SRGB);
@@ -1332,7 +1296,7 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::R11G11B10F:
 		case TextureFormat::D32:
 		case TextureFormat::D24S8: ASSERT(no_mips); break;
-		default: ASSERT(false); return false;
+		default: ASSERT(false); return;
 	}
 
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, is_3d ? depth : 1));
@@ -1454,8 +1418,9 @@ bool createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 			d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc, &texture.srv);
 		}
 	}
-	return true;
 }
+
+IAllocator& getAllocator() { return d3d->allocator; }
 
 void setState(StateFlags state)
 {
@@ -1671,9 +1636,9 @@ static void applyComputeUniformBlocks() {
 	d3d->dirty_compute_uniform_blocks = 0;
 }
 
-void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_count) {
+void drawArraysInstanced(u32 indices_count, u32 instances_count) {
 	D3D11_PRIMITIVE_TOPOLOGY topology;
-	switch(type) {
+	switch(d3d->current_program->primitive_type) {
 		case PrimitiveType::LINES: topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
 		case PrimitiveType::POINTS: topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
 		case PrimitiveType::TRIANGLES: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
@@ -1685,10 +1650,10 @@ void drawArraysInstanced(PrimitiveType type, u32 indices_count, u32 instances_co
 	d3d->device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
 }
 
-void drawArrays(PrimitiveType type, u32 offset, u32 count)
+void drawArrays(u32 offset, u32 count)
 {
 	D3D11_PRIMITIVE_TOPOLOGY topology;
-	switch(type) {
+	switch(d3d->current_program->primitive_type) {
 		case PrimitiveType::LINES: topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
 		case PrimitiveType::POINTS: topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
 		case PrimitiveType::TRIANGLES: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
@@ -1850,10 +1815,10 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 	d3d->device_ctx->CSSetSamplers(offset, count, samplers);
 }
 
-void drawIndexedInstanced(PrimitiveType primitive_type, u32 indices_count, u32 instances_count, DataType index_type) {
+void drawIndexedInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
 	ASSERT(d3d->current_index_buffer);
 	D3D11_PRIMITIVE_TOPOLOGY pt;
-	switch (primitive_type) {
+	switch (d3d->current_program->primitive_type) {
 		case PrimitiveType::TRIANGLES: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
 		case PrimitiveType::TRIANGLE_STRIP: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
 		case PrimitiveType::LINES: pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
@@ -1874,10 +1839,10 @@ void drawIndexedInstanced(PrimitiveType primitive_type, u32 indices_count, u32 i
 	d3d->device_ctx->DrawIndexedInstanced(indices_count, instances_count, 0, 0, 0);
 }
 
-void drawIndexed(PrimitiveType primitive_type, u32 offset, u32 count, DataType index_type) {
+void drawIndexed(u32 offset, u32 count, DataType index_type) {
 	ASSERT(d3d->current_index_buffer);
 	D3D11_PRIMITIVE_TOPOLOGY pt;
-	switch (primitive_type) {
+	switch (d3d->current_program->primitive_type) {
 		case PrimitiveType::TRIANGLES: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
 		case PrimitiveType::TRIANGLE_STRIP: pt = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
 		case PrimitiveType::LINES: pt = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
@@ -1930,17 +1895,18 @@ void update(BufferHandle buffer, const void* data, size_t size) {
 	}
 }
 
-bool createProgram(ProgramHandle program, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name)
+void createProgram(ProgramHandle program, StateFlags state, const VertexDecl& decl, const char** srcs, const ShaderType* types, u32 num, const char** prefixes, u32 prefixes_count, const char* name)
 {
 	ASSERT(program);
 	#ifdef LUMIX_DEBUG
 		program->name = name;
 	#endif
 
+	program->state = state;
+	program->primitive_type = decl.primitive_type;
 	ShaderCompiler::Input args { decl, Span(srcs, num), Span(types, num), Span(prefixes, prefixes_count) };
 
-	if (!d3d->shader_compiler.compile(d3d->device, args, name, *program)) return false;
-	return true;
+	d3d->shader_compiler.compile(d3d->device, args, name, *program);
 }
 
 } // ns gpu
