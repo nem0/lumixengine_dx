@@ -148,6 +148,23 @@ struct Buffer {
 	u32 heap_id = INVALID_HEAP_ID;
 };
 
+struct BindGroup {
+	struct TextureEntry {
+		TextureHandle handle;
+		u32 bind_point;
+	};
+	struct UniformBufferEntry {
+		BufferHandle handle;
+		u32 bind_point;
+		u32 offset;
+		u32 size;
+	};
+	TextureEntry textures[16];
+	u32 textures_count = 0;
+	UniformBufferEntry uniform_buffers[8];
+	u32 uniform_buffers_count = 0;
+};
+
 struct Texture {
 	D3D12_RESOURCE_STATES setState(ID3D12GraphicsCommandList* cmd_list, D3D12_RESOURCE_STATES new_state) {
 		if (state == new_state) return state;
@@ -1015,6 +1032,11 @@ void destroy(ProgramHandle program) {
 	LUMIX_DELETE(d3d->allocator, program);
 }
 
+void destroy(BindGroupHandle group) {
+	checkThread();
+	LUMIX_DELETE(d3d->allocator, group);
+}
+
 void destroy(TextureHandle texture) {
 	checkThread();
 	ASSERT(texture);
@@ -1842,6 +1864,10 @@ BufferHandle allocBufferHandle() {
 	return LUMIX_NEW(d3d->allocator, Buffer);
 }
 
+BindGroupHandle allocBindGroupHandle() {
+	return LUMIX_NEW(d3d->allocator, BindGroup);
+}
+
 TextureHandle allocTextureHandle() {
 	return LUMIX_NEW(d3d->allocator, Texture);
 }
@@ -2204,6 +2230,37 @@ void bindImageTexture(TextureHandle handle, u32 unit) {
 			d3d->dirty_samplers = true;
 		}
 		handle->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	}
+}
+
+void createBindGroup(BindGroupHandle group, Span<const BindGroupEntryDesc> descriptors) {
+	for (const BindGroupEntryDesc& desc : descriptors) {
+		switch(desc.type) {
+			case BindGroupEntryDesc::TEXTURE:
+				group->textures[group->textures_count].handle = desc.texture;
+				group->textures[group->textures_count].bind_point = desc.bind_point;
+				++group->textures_count;
+				break;
+			case BindGroupEntryDesc::UNIFORM_BUFFER:
+				group->uniform_buffers[group->uniform_buffers_count].handle = desc.buffer;
+				group->uniform_buffers[group->uniform_buffers_count].bind_point = desc.bind_point;
+				group->uniform_buffers[group->uniform_buffers_count].offset = desc.offset;
+				group->uniform_buffers[group->uniform_buffers_count].size = desc.size;
+				++group->uniform_buffers_count;
+				break;
+			default: ASSERT(false); break;
+		}
+	}
+}
+
+void bind(BindGroupHandle group) {
+	for (u32 i = 0; i < group->textures_count; ++i) {
+		const BindGroup::TextureEntry& t = group->textures[i];
+		bindTextures(&t.handle, t.bind_point, 1);
+	}
+	for (u32 i = 0; i < group->uniform_buffers_count; ++i) {
+		const BindGroup::UniformBufferEntry& ub = group->uniform_buffers[i];
+		bindUniformBuffer(ub.bind_point, ub.handle, ub.offset, ub.size);
 	}
 }
 

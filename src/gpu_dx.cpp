@@ -86,6 +86,23 @@ struct Buffer {
 	u32 bound_to_output = 0xffFFffFF; 
 };
 
+struct BindGroup {
+	struct TextureEntry {
+		TextureHandle handle;
+		u32 bind_point;
+	};
+	struct UniformBufferEntry {
+		BufferHandle handle;
+		u32 bind_point;
+		u32 offset;
+		u32 size;
+	};
+	TextureEntry textures[16];
+	u32 textures_count = 0;
+	UniformBufferEntry uniform_buffers[8];
+	u32 uniform_buffers_count = 0;
+};
+
 struct Texture {
 	~Texture() {
 		if (srv) srv->Release();
@@ -392,8 +409,12 @@ void checkThread() {
 
 void destroy(ProgramHandle program) {
 	checkThread();
-	
 	LUMIX_DELETE(d3d->allocator, program)
+}
+
+void destroy(BindGroupHandle group) {
+	checkThread();
+	LUMIX_DELETE(d3d->allocator, group);
 }
 
 void destroy(TextureHandle texture) {
@@ -419,6 +440,26 @@ void createTextureView(TextureHandle view, TextureHandle texture) {
 	}
 
 	d3d->device->CreateShaderResourceView(texture->texture2D, &srv_desc, &view->srv);
+}
+
+void createBindGroup(BindGroupHandle group, Span<const BindGroupEntryDesc> descriptors) {
+	for (const BindGroupEntryDesc& desc : descriptors) {
+		switch(desc.type) {
+			case BindGroupEntryDesc::TEXTURE:
+				group->textures[group->textures_count].handle = desc.texture;
+				group->textures[group->textures_count].bind_point = desc.bind_point;
+				++group->textures_count;
+				break;
+			case BindGroupEntryDesc::UNIFORM_BUFFER:
+				group->uniform_buffers[group->uniform_buffers_count].handle = desc.buffer;
+				group->uniform_buffers[group->uniform_buffers_count].bind_point = desc.bind_point;
+				group->uniform_buffers[group->uniform_buffers_count].offset = desc.offset;
+				group->uniform_buffers[group->uniform_buffers_count].size = desc.size;
+				++group->uniform_buffers_count;
+				break;
+			default: ASSERT(false); break;
+		}
+	}
 }
 
 void generateMipmaps(TextureHandle texture){
@@ -1225,6 +1266,10 @@ BufferHandle allocBufferHandle()
 	return { b };
 }
 
+BindGroupHandle allocBindGroupHandle() {
+	return LUMIX_NEW(d3d->allocator, BindGroup);
+}
+
 TextureHandle allocTextureHandle()
 {
 	Texture* t = LUMIX_NEW(d3d->allocator, Texture);
@@ -1770,6 +1815,18 @@ void bindImageTexture(TextureHandle handle, u32 unit) {
 		ID3D11UnorderedAccessView* uav = nullptr;
 		d3d->device_ctx->CSSetUnorderedAccessViews(unit, 1, &uav, nullptr);
 		d3d->bound_image_textures[unit] = INVALID_TEXTURE;
+	}
+}
+
+
+void bind(BindGroupHandle group) {
+	for (u32 i = 0; i < group->textures_count; ++i) {
+		const BindGroup::TextureEntry& t = group->textures[i];
+		bindTextures(&t.handle, t.bind_point, 1);
+	}
+	for (u32 i = 0; i < group->uniform_buffers_count; ++i) {
+		const BindGroup::UniformBufferEntry& ub = group->uniform_buffers[i];
+		bindUniformBuffer(ub.bind_point, ub.handle, ub.offset, ub.size);
 	}
 }
 
