@@ -1718,7 +1718,7 @@ u32 swapBuffers() {
 	}
 
 	d3d->frame->end(d3d->cmd_queue, d3d->cmd_list, d3d->timestamp_query_heap, d3d->stats_query_heap);
-	const u32 res = u32(d3d->frame - d3d->frames.begin());
+	const u32 frame_idx = u32(d3d->frame - d3d->frames.begin());
 
 	++d3d->frame;
 	if (d3d->frame >= d3d->frames.end()) d3d->frame = d3d->frames.begin();
@@ -1785,7 +1785,7 @@ u32 swapBuffers() {
 		switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	}
 
-	return res;
+	return frame_idx;
 }
 
 void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const void* data) {
@@ -2321,9 +2321,9 @@ void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 		desc.ByteStride = sizeof(u32) * 5;
 		desc.NumArgumentDescs = 1;
 		desc.pArgumentDescs = &arg_desc;
-		ID3D12CommandSignature* signature;
-		d3d->device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&signature));
-		return signature;
+		ID3D12CommandSignature* result;
+		d3d->device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&result));
+		return result;
 	}();
 
 	d3d->cmd_list->ExecuteIndirect(signature, 1, d3d->current_indirect_buffer->resource, indirect_buffer_offset, nullptr, 0);
