@@ -1051,7 +1051,7 @@ void destroy(QueryHandle query) {
 	LUMIX_DELETE(d3d->allocator, query);
 }
 
-void createTextureView(TextureHandle view_handle, TextureHandle texture_handle) {
+void createTextureView(TextureHandle view_handle, TextureHandle texture_handle, u32 layer) {
 	// Texture& texture = d3d->textures[texture_handle.value];
 	// Texture& view = d3d->textures[view_handle.value];
 	// view.dxgi_format = texture.dxgi_format;

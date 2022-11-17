@@ -427,7 +427,7 @@ void destroy(QueryHandle query) {
 	LUMIX_DELETE(d3d->allocator, query);
 }
 
-void createTextureView(TextureHandle view, TextureHandle texture) {
+void createTextureView(TextureHandle view, TextureHandle texture, u32 layer) {
 	ASSERT(view);
 	ASSERT(texture);
 
@@ -435,7 +435,11 @@ void createTextureView(TextureHandle view, TextureHandle texture) {
 	view->sampler = texture->sampler;
 	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 	texture->srv->GetDesc(&srv_desc);
-	if (srv_desc.ViewDimension != D3D_SRV_DIMENSION_TEXTURE2D) {
+	if (srv_desc.ViewDimension == D3D_SRV_DIMENSION_TEXTURE2DARRAY) {
+		srv_desc.Texture2DArray.FirstArraySlice = layer;
+		srv_desc.Texture2DArray.ArraySize = 1;
+	}
+	else if (srv_desc.ViewDimension != D3D_SRV_DIMENSION_TEXTURE2D) {
 		srv_desc.ViewDimension = D3D_SRV_DIMENSION_TEXTURE2D;
 	}
 
