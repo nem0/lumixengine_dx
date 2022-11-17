@@ -342,24 +342,24 @@ static bool isDepthFormat(DXGI_FORMAT format) {
 	switch(format) {
 		case DXGI_FORMAT_R24G8_TYPELESS: return true;
 		case DXGI_FORMAT_R32_TYPELESS: return true;
+		default: return false;
 	}
-	return false;
 }
 
 static DXGI_FORMAT toViewFormat(DXGI_FORMAT format) {
 	switch(format) {
 		case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
 		case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_R32_FLOAT;
+		default: return format;
 	}
-	return format;
 }
 
 static DXGI_FORMAT toDSViewFormat(DXGI_FORMAT format) {
 	switch(format) {
 		case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_D24_UNORM_S8_UINT;
 		case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_D32_FLOAT;
+		default: return format;
 	}
-	return format;
 }
 
 void beginQuery(QueryHandle query) {
