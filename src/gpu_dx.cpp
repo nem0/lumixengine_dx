@@ -332,9 +332,12 @@ static void try_load_renderdoc() {
 	//FreeLibrary(lib);
 }
 
-void launchRenderDoc() {
+void captureRenderDocFrame() {
 	if (d3d->rdoc_api) {
-		d3d->rdoc_api->LaunchReplayUI(1, "");
+		if (!d3d->rdoc_api->IsRemoteAccessConnected()) {
+			d3d->rdoc_api->LaunchReplayUI(1, "");
+		}
+		d3d->rdoc_api->TriggerCapture();
 	}
 }
 
@@ -435,6 +438,11 @@ void createTextureView(TextureHandle view, TextureHandle texture, u32 layer) {
 	view->sampler = texture->sampler;
 	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 	texture->srv->GetDesc(&srv_desc);
+	if (srv_desc.ViewDimension == D3D_SRV_DIMENSION_TEXTURECUBE) {
+		srv_desc.ViewDimension = D3D_SRV_DIMENSION_TEXTURE2DARRAY;
+		srv_desc.Texture2DArray.FirstArraySlice = layer;
+		srv_desc.Texture2DArray.ArraySize = 1;
+	}
 	if (srv_desc.ViewDimension == D3D_SRV_DIMENSION_TEXTURE2DARRAY) {
 		srv_desc.Texture2DArray.FirstArraySlice = layer;
 		srv_desc.Texture2DArray.ArraySize = 1;

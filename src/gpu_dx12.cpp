@@ -966,9 +966,12 @@ static D3D12_CPU_DESCRIPTOR_HANDLE allocRTV(HeapAllocator& heap, ID3D12Resource*
 	return res;
 }
 
-void launchRenderDoc() {
+void captureRenderDocFrame() {
 	if (d3d->rdoc_api) {
-		d3d->rdoc_api->LaunchReplayUI(1, "");
+		if (!d3d->rdoc_api->IsRemoteAccessConnected()) {
+			d3d->rdoc_api->LaunchReplayUI(1, "");
+		}
+		d3d->rdoc_api->TriggerCapture();
 	}
 }
 
