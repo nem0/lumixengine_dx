@@ -140,7 +140,7 @@ static u32 getSize(DXGI_FORMAT format) {
 
 static DXGI_FORMAT getDXGIFormat(TextureFormat format, bool is_srgb) {
 	const FormatDesc& fd = FormatDesc::get(format);
-	return is_srgb ? fd.internal_srgb : fd.internal;
+	return is_srgb && fd.internal_srgb != DXGI_FORMAT_UNKNOWN ? fd.internal_srgb : fd.internal;
 }
 
 } // namespace Lumix::gpu
