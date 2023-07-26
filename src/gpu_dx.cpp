@@ -731,6 +731,25 @@ bool init(void* hwnd, InitFlags flags) {
 		, &feature_level
 		, &ctx);
 
+	if (hr == DXGI_ERROR_SDK_COMPONENT_MISSING) {
+		const u32 no_debug_create_flags = create_flags & ~D3D11_CREATE_DEVICE_DEBUG;
+		hr = api_D3D11CreateDeviceAndSwapChain(NULL
+		, D3D_DRIVER_TYPE_HARDWARE
+		, NULL
+		, no_debug_create_flags
+		, wanted_feature_levels
+		, 1
+		, D3D11_SDK_VERSION
+		, &desc
+		, &d3d->windows[0].swapchain
+		, &d3d->device
+		, &feature_level
+		, &ctx);
+		if (SUCCEEDED(hr)) {
+			logError("Failed to create D3D11 device with debug layer, using device without the debug layer");
+		}
+	}
+
 	if(!SUCCEEDED(hr)) {
 		logError("D3D11CreateDeviceAndSwapChain failed");
 		return false;
