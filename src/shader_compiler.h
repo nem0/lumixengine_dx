@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/allocator.h"
+#include "engine/allocators.h"
 #include "engine/hash.h"
 #include "engine/hash_map.h"
 #include "engine/os.h"
@@ -124,7 +125,7 @@ struct ShaderCompiler {
 		Span<const char*> prefixes;
 	};
 	ShaderCompiler(IAllocator& allocator)
-		: m_allocator(allocator)
+		: m_allocator(allocator, "shader compiler")
 		, m_cache(allocator) {}
 
 	static u32 filter(const Input& input, ShaderType type, const char* (&out)[128])
@@ -352,7 +353,7 @@ struct ShaderCompiler {
 		}
 	}
 
-	IAllocator& m_allocator;
+	TagAllocator m_allocator;
 	struct CachedShader {
 		CachedShader(IAllocator& allocator) : data(allocator) {}
 		OutputMemoryStream data;

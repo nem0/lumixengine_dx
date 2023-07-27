@@ -277,12 +277,12 @@ struct D3D {
 	};
 
 	D3D(IAllocator& allocator) 
-		: allocator(allocator)
+		: allocator(allocator, "gpu_d3d")
 		, state_cache(allocator)
 		, shader_compiler(allocator)
 	{}
 
-	IAllocator& allocator;
+	TagAllocator allocator;
 	DWORD thread;
 	RENDERDOC_API_1_0_2* rdoc_api;
 	ID3D11DeviceContext1* device_ctx = nullptr;
