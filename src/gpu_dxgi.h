@@ -77,6 +77,7 @@ struct FormatDesc {
 			case DXGI_FORMAT_R32G32B32A32_FLOAT : return get(TextureFormat::RGBA32F);
 			case DXGI_FORMAT_R11G11B10_FLOAT : return get(TextureFormat::R11G11B10F);
 			case DXGI_FORMAT_R32G32_FLOAT : return get(TextureFormat::RG32F);
+			case DXGI_FORMAT_R32G32B32_FLOAT : return get(TextureFormat::RGB32F);
 			
 			case DXGI_FORMAT_R32_TYPELESS : return get(TextureFormat::D32);
 			case DXGI_FORMAT_R24G8_TYPELESS : return get(TextureFormat::D24S8);
@@ -102,6 +103,7 @@ struct FormatDesc {
 			case TextureFormat::RGBA16F: return {		false,		8,	DXGI_FORMAT_R16G16B16A16_FLOAT,		DXGI_FORMAT_UNKNOWN};
 			case TextureFormat::RGBA32F: return {		false,		16, DXGI_FORMAT_R32G32B32A32_FLOAT,		DXGI_FORMAT_UNKNOWN};
 			case TextureFormat::RG32F: return {			false,		8,	DXGI_FORMAT_R32G32_FLOAT,			DXGI_FORMAT_UNKNOWN};
+			case TextureFormat::RGB32F: return {		false,		12,	DXGI_FORMAT_R32G32B32_FLOAT,		DXGI_FORMAT_UNKNOWN};
 			case TextureFormat::R32F: return {			false,		4,	DXGI_FORMAT_R32_FLOAT,				DXGI_FORMAT_UNKNOWN};
 
 			case TextureFormat::D32: return {			false,		4,	DXGI_FORMAT_R32_TYPELESS,			DXGI_FORMAT_UNKNOWN};

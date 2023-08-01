@@ -126,7 +126,7 @@ struct ShaderCompiler {
 	};
 	ShaderCompiler(IAllocator& allocator)
 		: m_allocator(allocator, "shader compiler")
-		, m_cache(allocator) {}
+		, m_cache(m_allocator) {}
 
 	static u32 filter(const Input& input, ShaderType type, const char* (&out)[128])
 	{

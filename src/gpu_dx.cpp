@@ -1356,6 +1356,7 @@ void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		case TextureFormat::RGBA32F:
 		case TextureFormat::R32F:
 		case TextureFormat::RG32F:
+		case TextureFormat::RGB32F:
 		case TextureFormat::SRGB:
 		case TextureFormat::SRGBA:
 		case TextureFormat::BC1:
