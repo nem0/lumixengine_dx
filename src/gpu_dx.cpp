@@ -1718,6 +1718,7 @@ static void applyComputeUniformBlocks() {
 void drawArraysInstanced(u32 indices_count, u32 instances_count) {
 	setState(d3d->current_program->state);
 	applyGFXUniformBlocks();
+	d3d->device_ctx->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
 	d3d->device_ctx->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 	d3d->device_ctx->DrawInstanced(indices_count, instances_count, 0, 0);
 }
@@ -1725,6 +1726,7 @@ void drawArraysInstanced(u32 indices_count, u32 instances_count) {
 void drawArrays(u32 offset, u32 count) {
 	setState(d3d->current_program->state);
 	applyGFXUniformBlocks();
+	d3d->device_ctx->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
 	d3d->device_ctx->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
 	d3d->device_ctx->Draw(count, offset);
 }
