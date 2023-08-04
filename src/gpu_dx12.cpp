@@ -6,6 +6,7 @@
 #include "engine/hash_map.h"
 #include "engine/log.h"
 #include "engine/math.h"
+#include "engine/profiler.h"
 #include "engine/stream.h"
 #include "engine/string.h"
 #include "engine/sync.h"
@@ -181,6 +182,7 @@ struct Texture {
 	TextureFlags flags;
 	u32 w;
 	u32 h;
+	bool is_view = false;
 	#ifdef LUMIX_DEBUG
 		StaticString<64> name;
 	#endif
@@ -1044,7 +1046,7 @@ void destroy(TextureHandle texture) {
 	checkThread();
 	ASSERT(texture);
 	Texture& t = *texture;
-	if (t.resource) d3d->frame->to_release.push(t.resource);
+	if (t.resource && !t.is_view) d3d->frame->to_release.push(t.resource);
 	if (t.heap_id != INVALID_HEAP_ID) d3d->frame->to_heap_release.push(t.heap_id);
 	LUMIX_DELETE(d3d->allocator, texture);
 }
@@ -1052,22 +1054,6 @@ void destroy(TextureHandle texture) {
 void destroy(QueryHandle query) {
 	checkThread();
 	LUMIX_DELETE(d3d->allocator, query);
-}
-
-void createTextureView(TextureHandle view_handle, TextureHandle texture_handle, u32 layer) {
-	// Texture& texture = d3d->textures[texture_handle.value];
-	// Texture& view = d3d->textures[view_handle.value];
-	// view.dxgi_format = texture.dxgi_format;
-	// view.sampler = texture.sampler;
-	// D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-	// texture.srv->GetDesc(&srv_desc);
-	// if (srv_desc.ViewDimension != D3D_SRV_DIMENSION_TEXTURE2D) {
-	//	srv_desc.ViewDimension = D3D_SRV_DIMENSION_TEXTURE2D;
-	//}
-	//
-	// d3d->device->CreateShaderResourceView(texture.texture2D, &srv_desc,
-	// &view.srv);
-	ASSERT(false); // TODO
 }
 
 void generateMipmaps(TextureHandle handle) {
@@ -1285,6 +1271,8 @@ void shutdown() {
 }
 
 ID3D12RootSignature* createRootSignature() {
+	PROFILE_FUNCTION();
+
 	constexpr u32 MAX_SAMPLERS = 32;
 	constexpr u32 MAX_CBV = 16;
 	D3D12_DESCRIPTOR_RANGE descRange[] = {
@@ -1354,6 +1342,7 @@ ID3D12RootSignature* createRootSignature() {
 
 // TODO srgb window swapchain views
 static bool createSwapchain(HWND hwnd, D3D::Window& window) {
+	PROFILE_FUNCTION();
 	DXGI_SWAP_CHAIN_DESC1 sd = {};
 	sd.BufferCount = NUM_BACKBUFFERS;
 	sd.Width = window.size.x;
@@ -1392,6 +1381,7 @@ static bool createSwapchain(HWND hwnd, D3D::Window& window) {
 }
 
 bool init(void* hwnd, InitFlags flags) {
+	PROFILE_FUNCTION();
 	bool debug = u32(flags & InitFlags::DEBUG_OUTPUT);
 #ifdef LUMIX_DEBUG
 	debug = true;
@@ -1409,9 +1399,11 @@ bool init(void* hwnd, InitFlags flags) {
 
 	const int width = rect.right - rect.left;
 	const int height = rect.bottom - rect.top;
-
-	d3d->d3d_dll = LoadLibrary("d3d12.dll");
-	d3d->dxgi_dll = LoadLibrary("dxgi.dll");
+	{
+		PROFILE_BLOCK("load libs");
+		d3d->d3d_dll = LoadLibrary("d3d12.dll");
+		d3d->dxgi_dll = LoadLibrary("dxgi.dll");
+	}
 	if (!d3d->d3d_dll) {
 		logError("Failed to load d3d11.dll");
 		return false;
@@ -1875,6 +1867,36 @@ TextureHandle allocTextureHandle() {
 	return LUMIX_NEW(d3d->allocator, Texture);
 }
 
+void createTextureView(TextureHandle view_handle, TextureHandle texture_handle, u32 layer) {
+	Texture& texture = *texture_handle;
+	Texture& view = *view_handle;
+	view.dxgi_format = texture.dxgi_format;
+	view.w = texture.w;
+	view.h = texture.h;
+	view.flags = texture.flags;
+	view.resource = texture.resource;
+	view.state = texture.state;
+	view.is_view = true;
+
+	const bool is_srgb = u32(texture.flags & TextureFlags::SRGB);
+	const bool no_mips = u32(texture.flags & TextureFlags::NO_MIPS);
+	const bool is_3d = u32(texture.flags & TextureFlags::IS_3D);
+	const bool is_cubemap = u32(texture.flags & TextureFlags::IS_CUBE);
+	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(view.w, view.h));
+	ASSERT(!is_3d && !is_cubemap);
+	
+	D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+	srv_desc.Format = texture.dxgi_format;
+	srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srv_desc.Texture2D.MipLevels = mip_count;
+	srv_desc.Texture2D.MostDetailedMip = 0;
+	srv_desc.Texture2D.ResourceMinLODClamp = 0;
+	srv_desc.Texture2D.PlaneSlice = 0;
+
+	view.heap_id = d3d->srv_heap.alloc(d3d->device, texture.resource, srv_desc, nullptr);
+}
+
 void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat format, TextureFlags flags, const char* debug_name) {
 	ASSERT(handle);
 
@@ -1958,6 +1980,7 @@ void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		texture.name = debug_name;
 	#endif
 
+	texture.is_view = false;
 	texture.flags = flags;
 	texture.w = w;
 	texture.h = h;

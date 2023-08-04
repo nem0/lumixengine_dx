@@ -5,6 +5,7 @@
 #include "engine/hash.h"
 #include "engine/hash_map.h"
 #include "engine/os.h"
+#include "engine/profiler.h"
 #include <d3dcompiler.h>
 
 #pragma comment(lib, "d3dcompiler.lib")
@@ -299,6 +300,7 @@ struct ShaderCompiler {
 	}
 
 	void load(const char* filename) {
+		PROFILE_FUNCTION();
 		os::InputFile file;
 		if (file.open(filename)) {
 			u32 version;

@@ -8,6 +8,7 @@
 #include "engine/log.h"
 #include "engine/math.h"
 #include "engine/os.h"
+#include "engine/profiler.h"
 #include "engine/sync.h"
 #include "engine/stream.h"
 #include "engine/string.h"
@@ -659,6 +660,7 @@ void shutdown() {
 }
 
 bool init(void* hwnd, InitFlags flags) {
+	PROFILE_FUNCTION();
 	if (d3d->initialized) {
 		// we don't support reinitialization
 		ASSERT(false);
