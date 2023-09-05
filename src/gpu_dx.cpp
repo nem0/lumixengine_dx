@@ -705,7 +705,7 @@ bool init(void* hwnd, InitFlags flags) {
 	DXGI_SWAP_CHAIN_DESC desc = {};
 	desc.BufferDesc.Width = width;
 	desc.BufferDesc.Height = height;
-	desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	desc.BufferDesc.RefreshRate.Numerator = 60;
 	desc.BufferDesc.RefreshRate.Denominator = 1;
 	desc.OutputWindow = (HWND)hwnd;
@@ -748,12 +748,12 @@ bool init(void* hwnd, InitFlags flags) {
 		, &feature_level
 		, &ctx);
 		if (SUCCEEDED(hr)) {
-			logError("Failed to create D3D11 device with debug layer, using device without the debug layer");
+			logWarning("Failed to create D3D11 device with debug layer, using device without the debug layer");
 		}
 	}
 
 	if(!SUCCEEDED(hr)) {
-		logError("D3D11CreateDeviceAndSwapChain failed");
+		logError("D3D11CreateDeviceAndSwapChain failed, error code: ", hr);
 		return false;
 	}
 
@@ -1165,7 +1165,7 @@ u32 swapBuffers()
 			ID3D11Texture2D* rt;
 			d3d->device_ctx->OMSetRenderTargets(0, nullptr, 0);
 			d3d->device_ctx->ClearState();
-			window.swapchain->ResizeBuffers(1, size.x, size.y, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+			window.swapchain->ResizeBuffers(2, size.x, size.y, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
 			HRESULT hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
 			ASSERT(SUCCEEDED(hr));
 

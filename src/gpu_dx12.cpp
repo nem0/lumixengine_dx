@@ -1116,7 +1116,7 @@ void update(TextureHandle texture, u32 mip, u32 x, u32 y, u32 z, u32 w, u32 h, T
 }
 
 void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
-	/*ASSERT(dst);
+	ASSERT(dst);
 	ASSERT(src);
 
 	const bool no_mips = u32(src->flags & TextureFlags::NO_MIPS);
@@ -1159,8 +1159,7 @@ void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
 		if (u32(dst->flags & TextureFlags::NO_MIPS)) break;
 	}
 	src->setState(d3d->cmd_list, src_prev_state);
-	dst->setState(d3d->cmd_list, dst_prev_state);*/
-	ASSERT(false);
+	dst->setState(d3d->cmd_list, dst_prev_state);
 }
 
 void readTexture(TextureHandle texture, u32 mip, Span<u8> buf) {
@@ -1775,6 +1774,9 @@ u32 swapBuffers() {
 		else {
 			window.swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
 		}
+		
+		//DXGI_FRAME_STATISTICS stats;
+		//window.swapchain->GetFrameStatistics(&stats);
 
 		const UINT current_idx = window.swapchain->GetCurrentBackBufferIndex();
 		switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
