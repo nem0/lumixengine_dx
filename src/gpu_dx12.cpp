@@ -421,7 +421,7 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 			const bool instanced = attr.flags & Attribute::INSTANCED;
 			program.attributes[i].AlignedByteOffset = attr.byte_offset;
 			program.attributes[i].Format = getDXGIFormat(attr);
-			program.attributes[i].SemanticIndex = attr.idx;
+			program.attributes[i].SemanticIndex = i;
 			program.attributes[i].SemanticName = "TEXCOORD";
 			program.attributes[i].InputSlot = instanced ? 1 : 0;
 			program.attributes[i].InputSlotClass = instanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
@@ -1928,6 +1928,7 @@ void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 
 		case TextureFormat::RG8:
 		case TextureFormat::R16:
+		case TextureFormat::RG16:
 		case TextureFormat::RGBA16:
 		case TextureFormat::R16F:
 		case TextureFormat::RGBA16F:
