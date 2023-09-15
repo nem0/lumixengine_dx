@@ -160,7 +160,6 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 			case ShaderType::FRAGMENT: hr = device->CreatePixelShader(ptr, len, nullptr, &program.ps); break;
 			case ShaderType::GEOMETRY: hr = device->CreateGeometryShader(ptr, len, nullptr, &program.gs); break;
 			case ShaderType::COMPUTE: hr = device->CreateComputeShader(ptr, len, nullptr, &program.cs); break;
-			default: ASSERT(false); break;
 		}
 		return SUCCEEDED(hr);
 	}
@@ -231,7 +230,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 			const bool instanced = attr.flags & Attribute::INSTANCED;
 			descs[i].AlignedByteOffset = attr.byte_offset;
 			descs[i].Format = getDXGIFormat(attr);
-			descs[i].SemanticIndex = attr.idx;
+			descs[i].SemanticIndex = i;
 			descs[i].SemanticName = "TEXCOORD";
 			descs[i].InputSlot = instanced ? 1 : 0;
 			descs[i].InputSlotClass = instanced ? D3D11_INPUT_PER_INSTANCE_DATA : D3D11_INPUT_PER_VERTEX_DATA; 
@@ -385,7 +384,6 @@ QueryHandle createQuery(QueryType type) {
 	switch(type) {
 		case QueryType::STATS: desc.Query = D3D11_QUERY_PIPELINE_STATISTICS; break;
 		case QueryType::TIMESTAMP: desc.Query = D3D11_QUERY_TIMESTAMP; break;
-		default: ASSERT(false); break;
 	}
 	q->type = type;
 	d3d->device->CreateQuery(&desc, &q->query);
@@ -470,7 +468,6 @@ void createBindGroup(BindGroupHandle group, Span<const BindGroupEntryDesc> descr
 				group->uniform_buffers[group->uniform_buffers_count].size = desc.size;
 				++group->uniform_buffers_count;
 				break;
-			default: ASSERT(false); break;
 		}
 	}
 }
@@ -590,7 +587,6 @@ u64 getQueryResult(QueryHandle query) {
 			ASSERT(res == S_OK);
 			return stats.CInvocations;
 		}
-		default: ASSERT(false); break;
 	}
 	return 0;
 }
@@ -1369,13 +1365,13 @@ void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 		
 		case TextureFormat::RG8:
 		case TextureFormat::R16:
+		case TextureFormat::RG16:
 		case TextureFormat::RGBA16:
 		case TextureFormat::R16F:
 		case TextureFormat::RGBA16F:
 		case TextureFormat::R11G11B10F:
 		case TextureFormat::D32:
 		case TextureFormat::D24S8: ASSERT(no_mips); break;
-		default: ASSERT(false); return;
 	}
 
 	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(w, h, is_3d ? depth : 1));
@@ -1547,7 +1543,7 @@ static void setState(StateFlags state)
 				case StencilFuncs::ALWAYS: dx_func = D3D11_COMPARISON_ALWAYS; break;
 				case StencilFuncs::EQUAL: dx_func = D3D11_COMPARISON_EQUAL; break;
 				case StencilFuncs::NOT_EQUAL: dx_func = D3D11_COMPARISON_NOT_EQUAL; break;
-				default: ASSERT(false); break;
+				case StencilFuncs::DISABLE: ASSERT(false); break;
 			}
 			auto toDXOp = [](StencilOps op) {
 				constexpr D3D11_STENCIL_OP table[] = {
@@ -1974,7 +1970,6 @@ void createProgram(ProgramHandle program, StateFlags state, const VertexDecl& de
 		case PrimitiveType::LINES: program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
 		case PrimitiveType::POINTS: program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
 		case PrimitiveType::TRIANGLE_STRIP: program->primitive_topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
-		default: ASSERT(false); return;
 	}
 
 	ShaderCompiler::Input args { decl, Span(srcs, num), Span(types, num), Span(prefixes, prefixes_count) };

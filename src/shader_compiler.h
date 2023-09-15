@@ -135,7 +135,7 @@ struct ShaderCompiler {
 		out[0] = getTypeDefine(type);
 		out[1] = "#define LUMIX_DX_SHADER\n";
 		for (u32 i = 0; i < input.decl.attributes_count; ++i) {
-			out[i + 2] = getAttrDefine(input.decl.attributes[i].idx); 
+			out[i + 2] = getAttrDefine(i); 
 		}
 		for(u32 i = 0; i < input.prefixes.length(); ++i) {
 			out[i + 2 + input.decl.attributes_count] = input.prefixes[i];
@@ -163,6 +163,7 @@ struct ShaderCompiler {
 		}
 
 		glslang::TShader shader(lang);
+		shader.setAutoMapLocations(true);
 		shader.setStrings(srcs, count);
 		shader.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientOpenGL, 430);
 		shader.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetClientVersion::EShTargetOpenGL_450);
