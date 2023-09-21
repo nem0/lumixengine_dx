@@ -796,6 +796,18 @@ struct D3D {
 
 static Local<D3D> d3d;
 
+void* getDX12CommandList() {
+	return d3d->cmd_list;
+}
+
+void* getDX12Device() {
+	return d3d->device;
+}
+
+void* getDX12Resource(TextureHandle h) {
+	return h->resource;
+}
+
 void memoryBarrier(MemoryBarrierType type, BufferHandle buffer) {
 	D3D12_RESOURCE_BARRIER barrier;
 	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -1377,6 +1389,13 @@ static bool createSwapchain(HWND hwnd, D3D::Window& window) {
 	const UINT current_bb_idx = window.swapchain->GetCurrentBackBufferIndex();
 	switchState(d3d->cmd_list, window.backbuffers[current_bb_idx], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	return true;
+}
+
+void resetCommandList() {
+	d3d->cmd_list->SetGraphicsRootSignature(d3d->root_signature);
+	d3d->cmd_list->SetComputeRootSignature(d3d->root_signature);
+	ID3D12DescriptorHeap* heaps[] = {d3d->srv_heap.heap, d3d->sampler_heap.heap};
+	d3d->cmd_list->SetDescriptorHeaps(lengthOf(heaps), heaps);
 }
 
 bool init(void* hwnd, InitFlags flags) {
