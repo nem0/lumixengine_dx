@@ -28,7 +28,22 @@ if _OPTIONS["fsr2"] then
 	end
 end
 
+
 if _OPTIONS["nodx"] == nil then
+	if use_fsr2 then
+		project "fsr2"
+			libType()
+			files { 
+				"src/fsr2.cpp",
+				"src/fsr2.h",
+			}
+			links { "engine" }
+			includedirs { "external/include/fsr2" }
+			useLua()
+			defaultConfigurations()
+			linkPlugin("fsr2")
+	end
+
 	project "renderer"
 		files { 
 			"src/**.c",
@@ -36,18 +51,11 @@ if _OPTIONS["nodx"] == nil then
 			"src/**.h",
 			"genie.lua"
 		}
+		removefiles { "src/fsr2.h", "src/fsr2.cpp" }
 		excludes { "../../src/renderer/gpu/gpu_gl.cpp" }
-
-		if not use_fsr2 then
-			removefiles { "src/fsr2.h", "src/fsr2.cpp" }
-		end
 
 		if _OPTIONS["dx12"] then
 			includedirs {"external/pix/Include/WinPixEventRuntime", "external/include/dx" }
-			if use_fsr2 then
-				defines { "LUMIX_FSR2" }
-				includedirs { "external/include/fsr2" }
-			end
 			files { "external/pix/bin/x64/WinPixEventRuntime.dll" }
 			copy { "external/pix/bin/x64/WinPixEventRuntime.dll" }
 			excludes { "src/gpu_dx.cpp" }
