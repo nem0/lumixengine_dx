@@ -1497,7 +1497,9 @@ void createTexture(TextureHandle handle, u32 w, u32 h, u32 depth, TextureFormat 
 }
 
 void setDebugName(TextureHandle texture, const char* debug_name) {
-	texture->name = debug_name;
+	#ifdef LUMIX_DEBUG
+		texture->name = debug_name;
+	#endif
 	if (texture->texture3D) texture->texture3D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
 	if (texture->texture2D) texture->texture2D->SetPrivateData(WKPDID_D3DDebugObjectName, (UINT)strlen(debug_name), debug_name);
 }
