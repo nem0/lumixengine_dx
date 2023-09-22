@@ -6,7 +6,6 @@
 #include "renderer/draw_stream.h"
 #include "renderer/pipeline.h"
 #include "renderer/renderer.h"
-#include "fsr2.h"
 
 #include "ffx_fsr2.h"
 #include "dx12/ffx_fsr2_dx12.h"
@@ -52,6 +51,7 @@ struct FSR2RendererPlugin : Lumix::RenderPlugin, ISystem {
 		IVec2 size = IVec2(0);
 		FfxFsr2Context context;
 		OutputMemoryStream scratch_buffer;
+		u32 frames_since_last_use = 0;
 	};
 
 	const char* getName() const override { return "fsr2"; }
@@ -59,41 +59,26 @@ struct FSR2RendererPlugin : Lumix::RenderPlugin, ISystem {
 	void serialize(OutputMemoryStream& serializer) const override {}
 	bool deserialize(i32 version, InputMemoryStream& serializer) override { return true; }
 
+	void frame(Renderer& renderer) override {
+		for (i32 i = m_contexts.size() - 1; i >= 0; --i) {
+			++m_contexts[i]->frames_since_last_use;
+			if (m_contexts[i]->frames_since_last_use > 6) {
+				ffxFsr2ContextDestroy(&m_contexts[i]->context);
+				m_contexts.erase(i);
+			}
+		}
+	}
+
 	void systemAdded(ISystem& system) override {
 		if (equalStrings("renderer", system.getName())) {
 			((Renderer&)system).addPlugin(*this);
 		}
 	}
 
-	bool resize(FSR2Context& ctx, IVec2 display_size) {
-		ffxFsr2ContextDestroy(&ctx.context);
-
-		FfxFsr2ContextDescription initialization_parameters = {};
-		ctx.scratch_buffer.resize(ffxFsr2GetScratchMemorySizeDX12());
-		ID3D12Device* device = (ID3D12Device*)gpu::getDX12Device();
-		FfxErrorCode err = ffxFsr2GetInterfaceDX12(&initialization_parameters.callbacks, device, ctx.scratch_buffer.getMutableData(), ctx.scratch_buffer.size());
-		if (err != FFX_OK) return false;
-		
-		initialization_parameters.device = ffxGetDeviceDX12(device);
-		initialization_parameters.flags = FFX_FSR2_ENABLE_AUTO_EXPOSURE;
-		initialization_parameters.flags |= FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_DEPTH_INFINITE;
-		initialization_parameters.flags |= FFX_FSR2_ENABLE_DEBUG_CHECKING;
-		initialization_parameters.flags |= FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE;
-		initialization_parameters.fpMessage = &onFSR2Msg;
-
-		initialization_parameters.displaySize.width = display_size.x;
-		initialization_parameters.displaySize.height = display_size.y;
-		initialization_parameters.maxRenderSize.width = display_size.x;
-		initialization_parameters.maxRenderSize.height = display_size.y;
-		err = ffxFsr2ContextCreate(&ctx.context, &initialization_parameters);
-		ctx.size = display_size;
-
-		return err == FFX_OK;
-	}
-
 	FSR2Context* getOrCreateContext(Pipeline& pipeline) {
 		for (i32 i = 0; i < m_contexts.size(); ++i) {
 			if (m_contexts[i]->pipeline == &pipeline) {
+				m_contexts[i]->frames_since_last_use = 0;
 				return m_contexts[i].get();
 			}
 		}
@@ -124,6 +109,7 @@ struct FSR2RendererPlugin : Lumix::RenderPlugin, ISystem {
 		err = ffxFsr2ContextCreate(&ctx->context, &initialization_parameters);
 		if (err != FFX_OK) m_contexts.pop();
 		
+		ctx->frames_since_last_use = 0;
 		m_contexts.push(ctx.move());
 		return m_contexts.back().get();
 	}
@@ -150,8 +136,13 @@ struct FSR2RendererPlugin : Lumix::RenderPlugin, ISystem {
 		params.output = output;
 		stream.beginProfileBlock("FSR2", 0);
 		IVec2 display_size = pipeline.getDisplaySize();
-		stream.pushLambda([this, params, display_size, ctx](){
-			if (ctx->size != display_size) resize(*ctx, display_size);
+		// we mark context to be destroyed by setting pipeline to nullptr
+		// we can't destroy it immediately because GPU can still be using some resources from the context
+		if (ctx->size != display_size) {
+			ctx->pipeline = nullptr;
+			ctx = getOrCreateContext(pipeline);
+		}
+		stream.pushLambda([this, params, ctx, display_size](){
 			fsr2Dispatch(*ctx, params);
 		});
 		stream.endProfileBlock();
