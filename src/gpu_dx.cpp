@@ -706,8 +706,8 @@ bool init(void* hwnd, InitFlags flags) {
 	desc.BufferDesc.RefreshRate.Denominator = 1;
 	desc.OutputWindow = (HWND)hwnd;
 	desc.Windowed = true;
-	desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-	desc.BufferCount = 1;
+	desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	desc.BufferCount = 2;
 	desc.SampleDesc.Count = 1;
 	desc.SampleDesc.Quality = 0;
 	desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
