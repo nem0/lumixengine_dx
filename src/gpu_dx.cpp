@@ -21,7 +21,6 @@
 #include <cassert>
 #include <malloc.h>
 #include "renderer/gpu/renderdoc_app.h"
-#include "stb/stb_image_resize.h"
 
 #pragma comment(lib, "glslang.lib")
 #pragma comment(lib, "OSDependent.lib")
