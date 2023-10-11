@@ -13,7 +13,6 @@
 #include "gpu_dxgi.h"
 #include "renderer/gpu/gpu.h"
 #include "shader_compiler.h"
-#include "stb/stb_image_resize.h"
 #include <Windows.h>
 #include <cassert>
 #include <d3d12.h>
