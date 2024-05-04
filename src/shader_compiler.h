@@ -1,11 +1,11 @@
 #pragma once
 
-#include "engine/allocator.h"
-#include "engine/allocators.h"
-#include "engine/hash.h"
-#include "engine/hash_map.h"
-#include "engine/os.h"
-#include "engine/profiler.h"
+#include "core/allocator.h"
+#include "core/allocators.h"
+#include "core/hash.h"
+#include "core/hash_map.h"
+#include "core/os.h"
+#include "core/profiler.h"
 #include <d3dcompiler.h>
 
 #pragma comment(lib, "d3dcompiler.lib")
