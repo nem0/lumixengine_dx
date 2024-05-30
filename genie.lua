@@ -51,7 +51,7 @@ if _OPTIONS["nodx"] == nil then
 			"src/**.h",
 			"genie.lua"
 		}
-		removefiles { "src/fsr2.h", "src/fsr2.cpp" }
+		removefiles { "src/fsr2.h", "src/fsr2.cpp", "src/editor/fsr2_plugins.cpp" }
 		excludes { "../../src/renderer/gpu/gpu_gl.cpp" }
 
 		if _OPTIONS["dx12"] then
