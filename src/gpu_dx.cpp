@@ -748,7 +748,7 @@ bool init(void* hwnd, InitFlags flags) {
 	}
 
 	if(!SUCCEEDED(hr)) {
-		logError("D3D11CreateDeviceAndSwapChain failed, error code: ", hr);
+		logError("D3D11CreateDeviceAndSwapChain failed, error code: ", u32(hr));
 		return false;
 	}
 
