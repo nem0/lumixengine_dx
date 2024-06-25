@@ -5,6 +5,7 @@ Use `projects/main.bat` from main repo to install this plugin
 
 ## FSR2
 FSR2 can be used with DX12.
+0. download [fsr2 sdk](https://gpuopen.com/fidelityfx-superresolution-2/)
 1. generate projection with `genie.exe --dx12 --fsr2 vs2022`
 2. build and run studio
 3. enable fsr2 instead of taa (see image)
