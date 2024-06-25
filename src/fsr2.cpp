@@ -1,8 +1,8 @@
+#include "core/geometry.h"
+#include "core/log.h"
+#include "core/math.h"
+#include "core/stream.h"
 #include "engine/engine.h"
-#include "engine/geometry.h"
-#include "engine/log.h"
-#include "engine/math.h"
-#include "engine/stream.h"
 #include "renderer/draw_stream.h"
 #include "renderer/pipeline.h"
 #include "renderer/renderer.h"
@@ -142,7 +142,7 @@ struct FSR2RendererPlugin : Lumix::RenderPlugin, ISystem {
 			ctx->pipeline = nullptr;
 			ctx = getOrCreateContext(pipeline);
 		}
-		stream.pushLambda([this, params, ctx, display_size](){
+		stream.pushLambda([this, params, ctx](){
 			fsr2Dispatch(*ctx, params);
 		});
 		stream.endProfileBlock();

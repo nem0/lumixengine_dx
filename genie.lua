@@ -37,6 +37,9 @@ if _OPTIONS["nodx"] == nil then
 				"src/fsr2.cpp",
 				"src/fsr2.h",
 			}
+			if build_studio then
+				files { "src/editor/fsr2_plugins.cpp" }
+			end
 			links { "engine" }
 			includedirs { "external/include/fsr2" }
 			useLua()
