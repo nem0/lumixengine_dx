@@ -560,7 +560,7 @@ struct HeapAllocator {
 		if (device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap)) != S_OK) return false;
 
 		increment = device->GetDescriptorHandleIncrementSize(type);
-		gpu_begin = heap->GetGPUDescriptorHandleForHeapStart();
+		gpu_begin = is_rtv || is_dsv ? D3D12_GPU_DESCRIPTOR_HANDLE{} : heap->GetGPUDescriptorHandleForHeapStart();
 		cpu_begin = heap->GetCPUDescriptorHandleForHeapStart();
 		frame = 0;
 		gpu = gpu_begin;
