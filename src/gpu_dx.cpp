@@ -248,6 +248,7 @@ struct ShaderCompilerDX11 : ShaderCompiler {
 struct D3D {
 	bool initialized = false;
 	bool vsync = true;
+	u64 frame_number = 0;
 
 	struct FrameBuffer {
 		ID3D11DepthStencilView* depth_stencil = nullptr;
@@ -261,6 +262,7 @@ struct D3D {
 		FrameBuffer framebuffer;
 		FrameBuffer framebuffer_srgb;
 		IVec2 size = IVec2(800, 600);
+		u64 last_used_frame = 0;
 	};
 	
 	struct State {
@@ -730,7 +732,6 @@ bool init(void* hwnd, InitFlags flags) {
 	#define DECL_D3D_API(f) \
 		auto api_##f = (decltype(f)*)GetProcAddress(d3d->d3d_dll, #f);
 	
-	DECL_D3D_API(D3D11CreateDeviceAndSwapChain);
 	DECL_D3D_API(D3D11CreateDevice);
 	
 	const u32 create_flags = D3D11_CREATE_DEVICE_SINGLETHREADED | (debug ? D3D11_CREATE_DEVICE_DEBUG : 0);
@@ -748,7 +749,7 @@ bool init(void* hwnd, InitFlags flags) {
 	}
 
 	if (!SUCCEEDED(dev_hr)) {
-		logError("D3D11CreateDeviceAndSwapChain failed, error code: ", u64(dev_hr));
+		logError("D3D11CreateDevice failed, error code: ", u64(dev_hr));
 		return false;
 	}
 
@@ -1037,12 +1038,14 @@ void setCurrentWindow(void* window_handle)
 	
 	if (!window_handle) {
 		d3d->current_window = &d3d->windows[0];
+		d3d->current_window->last_used_frame = d3d->frame_number;
 		return;
 	}
 
 	for (auto& window : d3d->windows) {
 		if (window.handle == window_handle) {
 			d3d->current_window = &window;
+			d3d->current_window->last_used_frame = d3d->frame_number;
 			return;
 		}
 	}
@@ -1058,6 +1061,7 @@ void setCurrentWindow(void* window_handle)
 		GetClientRect((HWND)window_handle, &rect);
 		window.size = IVec2(rect.right - rect.left, rect.bottom - rect.top);
 		d3d->current_window = &window;
+		d3d->current_window->last_used_frame = d3d->frame_number;
 
 		const int width = rect.right - rect.left;
 		const int height = rect.bottom - rect.top;
@@ -1108,7 +1112,7 @@ void setCurrentWindow(void* window_handle)
 
 u32 swapBuffers()
 {
-	if(d3d->disjoint_waiting) {
+	if (d3d->disjoint_waiting) {
 		D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint_query_data;
 		const HRESULT res = d3d->device_ctx->GetData(d3d->disjoint_query, &disjoint_query_data, sizeof(disjoint_query_data), 0);
 		if (res == S_OK && disjoint_query_data.Disjoint == FALSE) {
@@ -1124,6 +1128,13 @@ u32 swapBuffers()
 
 	for (auto& window : d3d->windows) {
 		if (!window.handle) continue;
+		if (window.last_used_frame + 3 < d3d->frame_number) {
+			window.handle = nullptr;
+			window.framebuffer.render_targets[0]->Release();
+			window.framebuffer_srgb.render_targets[0]->Release();
+			window.swapchain->Release();
+		}
+		if (window.last_used_frame != d3d->frame_number) continue;
 
 		if (d3d->vsync) {
 			window.swapchain->Present(1, 0);
@@ -1202,6 +1213,7 @@ u32 swapBuffers()
 		}
 	}
 	d3d->current_framebuffer = d3d->windows[0].framebuffer;
+	++d3d->frame_number;
 	return 0;
 }
 
