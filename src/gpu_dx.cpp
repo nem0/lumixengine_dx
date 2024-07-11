@@ -753,6 +753,12 @@ bool init(void* hwnd, InitFlags flags) {
 		return false;
 	}
 
+	IDXGIDevice1* dxgidev1;
+	if (SUCCEEDED(d3d->device->QueryInterface(IID_PPV_ARGS(&dxgidev1)))) {
+		dxgidev1->SetMaximumFrameLatency(1);
+		dxgidev1->Release();
+	}
+
 	d3d->windows[0].swapchain = createSwapchain((HWND)hwnd, width, height);
 	if (!d3d->windows[0].swapchain) {
 		logError("Failed to create swapchain (", width, "x", height, ")");
