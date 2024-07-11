@@ -46,7 +46,7 @@
 namespace Lumix {
 namespace gpu {
 
-static constexpr u32 NUM_BACKBUFFERS = 3;
+static constexpr u32 NUM_BACKBUFFERS = 2;
 static constexpr u32 SCRATCH_BUFFER_SIZE = 8 * 1024 * 1024;
 static constexpr u32 MAX_DESCRIPTORS = 128 * 1024;
 static constexpr u32 TIMESTAMP_QUERY_COUNT = 2048;
@@ -741,6 +741,7 @@ struct D3D {
 		IDXGISwapChain3* swapchain = nullptr;
 		ID3D12Resource* backbuffers[NUM_BACKBUFFERS] = {};
 		IVec2 size = IVec2(800, 600);
+		u64 last_used_frame = 0;
 	};
 
 	D3D(IAllocator& allocator) 
@@ -789,6 +790,7 @@ struct D3D {
 	D3D12_GPU_VIRTUAL_ADDRESS uniform_blocks[6];
 	u32 dirty_compute_uniform_blocks = 0;
 	u32 dirty_gfx_uniform_blocks = 0;
+	u64 frame_number = 0;
 
 	bool vsync = true;
 };
@@ -1376,7 +1378,7 @@ static bool createSwapchain(HWND hwnd, D3D::Window& window) {
 
 	swapChain1->Release();
 	dxgi_factory->Release();
-	window.swapchain->SetMaximumFrameLatency(NUM_BACKBUFFERS);
+	window.swapchain->SetMaximumFrameLatency(1);
 
 	for (u32 i = 0; i < NUM_BACKBUFFERS; ++i) {
 		ID3D12Resource* backbuffer;
@@ -1682,12 +1684,14 @@ void setCurrentWindow(void* window_handle) {
 
 	if (!window_handle) {
 		d3d->current_window = &d3d->windows[0];
+		d3d->current_window->last_used_frame = d3d->frame_number;
 		return;
 	}
 
 	for (auto& window : d3d->windows) {
 		if (window.handle == window_handle) {
 			d3d->current_window = &window;
+			d3d->current_window->last_used_frame = d3d->frame_number;
 			return;
 		}
 	}
@@ -1697,6 +1701,7 @@ void setCurrentWindow(void* window_handle) {
 
 		window.handle = window_handle;
 		d3d->current_window = &window;
+		d3d->current_window->last_used_frame = d3d->frame_number;
 		RECT rect;
 		GetClientRect((HWND)window_handle, &rect);
 		window.size = IVec2(rect.right - rect.left, rect.bottom - rect.top);
@@ -1725,8 +1730,10 @@ u32 swapBuffers() {
 	for (auto& window : d3d->windows) {
 		if (!window.handle) continue;
 
-		const UINT current_idx = window.swapchain->GetCurrentBackBufferIndex();
-		switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+		if (window.last_used_frame == d3d->frame_number || &window == d3d->windows) {
+			const UINT current_idx = window.swapchain->GetCurrentBackBufferIndex();
+			switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+		}
 	}
 
 	d3d->frame->end(d3d->cmd_queue, d3d->cmd_list, d3d->timestamp_query_heap, d3d->stats_query_heap);
@@ -1739,6 +1746,16 @@ u32 swapBuffers() {
 	d3d->rtv_heap.nextFrame();
 	d3d->ds_heap.nextFrame();
 
+	for (auto& window : d3d->windows) {
+		if (!window.handle) continue;
+		if (window.last_used_frame + 2 < d3d->frame_number && &window != d3d->windows) {
+			window.handle = nullptr;
+			for (ID3D12Resource* res : window.backbuffers) res->Release();
+			window.swapchain->Release();
+		}
+	}
+	++d3d->frame_number;
+
 	d3d->frame->begin();
 	for (SRV& h : d3d->current_srvs) {
 		h.texture = INVALID_TEXTURE;
@@ -1746,9 +1763,18 @@ u32 swapBuffers() {
 	}
 	for (TextureHandle& h : d3d->current_framebuffer.attachments) h = INVALID_TEXTURE;
 
+	d3d->frame->scratch_buffer_ptr = d3d->frame->scratch_buffer_begin;
+	d3d->frame->cmd_allocator->Reset();
+	d3d->cmd_list->Reset(d3d->frame->cmd_allocator, nullptr);
+	d3d->cmd_list->SetGraphicsRootSignature(d3d->root_signature);
+	d3d->cmd_list->SetComputeRootSignature(d3d->root_signature);
+	ID3D12DescriptorHeap* heaps[] = { d3d->srv_heap.heap, d3d->sampler_heap.heap };
+	d3d->cmd_list->SetDescriptorHeaps(lengthOf(heaps), heaps);
+
 	for (auto& window : d3d->windows) {
 		if (!window.handle) continue;
-
+		if (window.last_used_frame + 1 != d3d->frame_number && &window != d3d->windows) continue;
+		
 		RECT rect;
 		GetClientRect((HWND)window.handle, &rect);
 
@@ -1768,23 +1794,16 @@ u32 swapBuffers() {
 
 			SIZE_T rtvDescriptorSize = d3d->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 			for (u32 i = 0; i < NUM_BACKBUFFERS; ++i) {
-				hr = d3d->windows[0].swapchain->GetBuffer(i, IID_PPV_ARGS(&d3d->windows[0].backbuffers[i]));
+				hr = window.swapchain->GetBuffer(i, IID_PPV_ARGS(&window.backbuffers[i]));
 				ASSERT(hr == S_OK);
-				d3d->windows[0].backbuffers[i]->SetName(L"window_rb");
+				window.backbuffers[i]->SetName(L"window_rb");
 			}
 		}
 	}
 
-	d3d->frame->scratch_buffer_ptr = d3d->frame->scratch_buffer_begin;
-	d3d->frame->cmd_allocator->Reset();
-	d3d->cmd_list->Reset(d3d->frame->cmd_allocator, nullptr);
-	d3d->cmd_list->SetGraphicsRootSignature(d3d->root_signature);
-	d3d->cmd_list->SetComputeRootSignature(d3d->root_signature);
-	ID3D12DescriptorHeap* heaps[] = {d3d->srv_heap.heap, d3d->sampler_heap.heap};
-	d3d->cmd_list->SetDescriptorHeaps(lengthOf(heaps), heaps);
-
 	for (auto& window : d3d->windows) {
 		if (!window.handle) continue;
+		if (window.last_used_frame + 1 != d3d->frame_number && &window != d3d->windows) continue;
 
 		if (d3d->vsync) {
 			window.swapchain->Present(1, 0);

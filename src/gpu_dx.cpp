@@ -257,7 +257,7 @@ struct D3D {
 
 	struct Window { 
 		void* handle = nullptr;
-		IDXGISwapChain* swapchain = nullptr;
+		IDXGISwapChain3* swapchain = nullptr;
 		FrameBuffer framebuffer;
 		FrameBuffer framebuffer_srgb;
 		IVec2 size = IVec2(800, 600);
@@ -654,6 +654,41 @@ void shutdown() {
 	d3d.destroy();
 }
 
+IDXGISwapChain3* createSwapchain(HWND hwnd, u32 width, u32 height) {
+	typedef HRESULT(WINAPI* PFN_CREATE_DXGI_FACTORY)(REFIID _riid, void** _factory);
+	static const GUID IID_IDXGIFactory = { 0x7b7166ec, 0x21c7, 0x44ae, { 0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69 } };
+	PFN_CREATE_DXGI_FACTORY CreateDXGIFactory1 = (PFN_CREATE_DXGI_FACTORY)GetProcAddress(d3d->dxgi_dll, "CreateDXGIFactory1");
+
+	// TODO only once
+	::IDXGIFactory5* factory;
+	CreateDXGIFactory1(IID_IDXGIFactory, (void**)&factory);
+
+	DXGI_SWAP_CHAIN_DESC1 desc = {};
+	desc.Width = width;
+	desc.Height = height;
+	desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	desc.BufferCount = 2;
+	desc.SampleDesc.Count = 1;
+	desc.SampleDesc.Quality = 0;
+	desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (d3d->vsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+	desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	desc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+	desc.Scaling = DXGI_SCALING_STRETCH;
+	desc.Stereo = FALSE;
+	IDXGISwapChain1* swapchain;
+	IDXGISwapChain3* swapchain3;
+	HRESULT hr = factory->CreateSwapChainForHwnd(d3d->device, hwnd, &desc, NULL, NULL, &swapchain);
+	factory->Release();
+	if (!SUCCEEDED(hr)) return nullptr;
+	
+	hr = swapchain->QueryInterface(IID_PPV_ARGS(&swapchain3));
+	swapchain->Release();
+	swapchain3->SetMaximumFrameLatency(1);
+
+	return SUCCEEDED(hr) ? swapchain3 : nullptr;
+}
+
 bool init(void* hwnd, InitFlags flags) {
 	PROFILE_FUNCTION();
 	if (d3d->initialized) {
@@ -696,59 +731,30 @@ bool init(void* hwnd, InitFlags flags) {
 		auto api_##f = (decltype(f)*)GetProcAddress(d3d->d3d_dll, #f);
 	
 	DECL_D3D_API(D3D11CreateDeviceAndSwapChain);
+	DECL_D3D_API(D3D11CreateDevice);
 	
-	DXGI_SWAP_CHAIN_DESC desc = {};
-	desc.BufferDesc.Width = width;
-	desc.BufferDesc.Height = height;
-	desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	desc.BufferDesc.RefreshRate.Numerator = 60;
-	desc.BufferDesc.RefreshRate.Denominator = 1;
-	desc.OutputWindow = (HWND)hwnd;
-	desc.Windowed = true;
-	desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-	desc.BufferCount = 2;
-	desc.SampleDesc.Count = 1;
-	desc.SampleDesc.Quality = 0;
-	desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-	desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 	const u32 create_flags = D3D11_CREATE_DEVICE_SINGLETHREADED | (debug ? D3D11_CREATE_DEVICE_DEBUG : 0);
 	D3D_FEATURE_LEVEL feature_level;
 	D3D_FEATURE_LEVEL wanted_feature_levels[] = { D3D_FEATURE_LEVEL_12_0 };
 	ID3D11DeviceContext* ctx;
-	HRESULT hr = api_D3D11CreateDeviceAndSwapChain(NULL
-		, D3D_DRIVER_TYPE_HARDWARE
-		, NULL
-		, create_flags
-		, wanted_feature_levels
-		, 1
-		, D3D11_SDK_VERSION
-		, &desc
-		, &d3d->windows[0].swapchain
-		, &d3d->device
-		, &feature_level
-		, &ctx);
 
-	if (hr == DXGI_ERROR_SDK_COMPONENT_MISSING) {
+	HRESULT dev_hr = api_D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, create_flags, wanted_feature_levels, 1, D3D11_SDK_VERSION, &d3d->device, &feature_level, &ctx);
+	if (!SUCCEEDED(dev_hr)) {
 		const u32 no_debug_create_flags = create_flags & ~D3D11_CREATE_DEVICE_DEBUG;
-		hr = api_D3D11CreateDeviceAndSwapChain(NULL
-		, D3D_DRIVER_TYPE_HARDWARE
-		, NULL
-		, no_debug_create_flags
-		, wanted_feature_levels
-		, 1
-		, D3D11_SDK_VERSION
-		, &desc
-		, &d3d->windows[0].swapchain
-		, &d3d->device
-		, &feature_level
-		, &ctx);
-		if (SUCCEEDED(hr)) {
+		dev_hr = api_D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, no_debug_create_flags, wanted_feature_levels, 1, D3D11_SDK_VERSION, &d3d->device, &feature_level, &ctx);
+		if (SUCCEEDED(dev_hr)) {
 			logWarning("Failed to create D3D11 device with debug layer, using device without the debug layer");
 		}
 	}
 
-	if(!SUCCEEDED(hr)) {
-		logError("D3D11CreateDeviceAndSwapChain failed, error code: ", u32(hr));
+	if (!SUCCEEDED(dev_hr)) {
+		logError("D3D11CreateDeviceAndSwapChain failed, error code: ", u64(dev_hr));
+		return false;
+	}
+
+	d3d->windows[0].swapchain = createSwapchain((HWND)hwnd, width, height);
+	if (!d3d->windows[0].swapchain) {
+		logError("Failed to create swapchain (", width, "x", height, ")");
 		return false;
 	}
 
@@ -756,7 +762,7 @@ bool init(void* hwnd, InitFlags flags) {
 	ctx->Release();
 
 	ID3D11Texture2D* rt;
-	hr = d3d->windows[0].swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
+	HRESULT hr = d3d->windows[0].swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
 	if(!SUCCEEDED(hr)) return false;
 
 	D3D11_RENDER_TARGET_VIEW_DESC rt_desc = {};
@@ -776,14 +782,14 @@ bool init(void* hwnd, InitFlags flags) {
 	d3d->windows[0].framebuffer.count = 1;
 	d3d->windows[0].framebuffer_srgb.count = 1;
 	
-	D3D11_TEXTURE2D_DESC ds_desc;
-	memset(&ds_desc, 0, sizeof(ds_desc));
+	D3D11_TEXTURE2D_DESC ds_desc = {};
 	ds_desc.Width = width;
 	ds_desc.Height = height;
 	ds_desc.MipLevels = 1;
 	ds_desc.ArraySize = 1;
 	ds_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-	ds_desc.SampleDesc = desc.SampleDesc;
+	ds_desc.SampleDesc.Count = 1;
+	ds_desc.SampleDesc.Quality = 0;
 	ds_desc.Usage = D3D11_USAGE_DEFAULT;
 	ds_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
 
@@ -1024,6 +1030,7 @@ void memoryBarrier(MemoryBarrierType, BufferHandle) {}
 
 bool getMemoryStats(MemoryStats& stats) { return false; }
 
+
 void setCurrentWindow(void* window_handle)
 {
 	checkThread();
@@ -1055,36 +1062,15 @@ void setCurrentWindow(void* window_handle)
 		const int width = rect.right - rect.left;
 		const int height = rect.bottom - rect.top;
 
-		typedef HRESULT (WINAPI* PFN_CREATE_DXGI_FACTORY)(REFIID _riid, void** _factory);
-		static const GUID IID_IDXGIFactory    = { 0x7b7166ec, 0x21c7, 0x44ae, { 0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69 } };
-		PFN_CREATE_DXGI_FACTORY CreateDXGIFactory1 = (PFN_CREATE_DXGI_FACTORY)GetProcAddress(d3d->dxgi_dll, "CreateDXGIFactory1");
-			
-		::IDXGIFactory5* factory;
-		CreateDXGIFactory1(IID_IDXGIFactory, (void**)&factory);
+		window.swapchain = createSwapchain((HWND)window.handle, width, height);
 
-		DXGI_SWAP_CHAIN_DESC desc = {};
-		desc.BufferDesc.Width = width;
-		desc.BufferDesc.Height = height;
-		desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-		desc.BufferDesc.RefreshRate.Numerator = 60;
-		desc.BufferDesc.RefreshRate.Denominator = 1;
-		desc.OutputWindow = (HWND)window_handle;
-		desc.Windowed = true;
-		desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-		desc.BufferCount = 1;
-		desc.SampleDesc.Count = 1;
-		desc.SampleDesc.Quality = 0;
-		desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-		desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		HRESULT hr = factory->CreateSwapChain(d3d->device, &desc, &window.swapchain);
-
-		if(!SUCCEEDED(hr)) {
+		if(!window.swapchain) {
 			logError("Failed to create swapchain");
 			return;
 		}
 
 		ID3D11Texture2D* rt;
-		hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
+		HRESULT hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
 		if(!SUCCEEDED(hr)) {
 			logError("Failed to get swapchain's buffer");
 			return;
@@ -1113,7 +1099,6 @@ void setCurrentWindow(void* window_handle)
 		window.framebuffer_srgb.count = 1;
 	
 		d3d->current_framebuffer = window.framebuffer;
-		factory->Release();
 		return;
 	}
 
@@ -1140,7 +1125,12 @@ u32 swapBuffers()
 	for (auto& window : d3d->windows) {
 		if (!window.handle) continue;
 
-		window.swapchain->Present(d3d->vsync ? 1 : 0, 0);
+		if (d3d->vsync) {
+			window.swapchain->Present(1, 0);
+		}
+		else {
+			window.swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+		}
 
 		RECT rect;
 		GetClientRect((HWND)window.handle, &rect);
@@ -1160,7 +1150,7 @@ u32 swapBuffers()
 			ID3D11Texture2D* rt;
 			d3d->device_ctx->OMSetRenderTargets(0, nullptr, 0);
 			d3d->device_ctx->ClearState();
-			window.swapchain->ResizeBuffers(2, size.x, size.y, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+			window.swapchain->ResizeBuffers(2, size.x, size.y, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (d3d->vsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING));
 			HRESULT hr = window.swapchain->GetBuffer(0, IID_ID3D11Texture2D, (void**)&rt);
 			ASSERT(SUCCEEDED(hr));
 
