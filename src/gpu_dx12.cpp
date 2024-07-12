@@ -793,6 +793,8 @@ struct D3D {
 	u64 frame_number = 0;
 
 	bool vsync = true;
+	bool vsync_dirty = false;
+	Mutex vsync_mutex;
 };
 
 static Local<D3D> d3d;
@@ -1353,14 +1355,14 @@ ID3D12RootSignature* createRootSignature() {
 }
 
 // TODO srgb window swapchain views
-static bool createSwapchain(HWND hwnd, D3D::Window& window) {
+static bool createSwapchain(HWND hwnd, D3D::Window& window, bool vsync) {
 	PROFILE_FUNCTION();
 	DXGI_SWAP_CHAIN_DESC1 sd = {};
 	sd.BufferCount = NUM_BACKBUFFERS;
 	sd.Width = window.size.x;
 	sd.Height = window.size.y;
 	sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (d3d->vsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+	sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (vsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
 	sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 	sd.SampleDesc.Count = 1;
 	sd.SampleDesc.Quality = 0;
@@ -1406,7 +1408,7 @@ bool init(void* hwnd, InitFlags flags) {
 	debug = true;
 #endif
 
-	d3d->vsync = u32(flags & InitFlags::VSYNC);
+	d3d->vsync = true;
 	d3d->thread = GetCurrentThreadId();
 	ShInitialize();
 
@@ -1513,7 +1515,7 @@ bool init(void* hwnd, InitFlags flags) {
 	ID3D12DescriptorHeap* heaps[] = {d3d->srv_heap.heap, d3d->sampler_heap.heap};
 	d3d->cmd_list->SetDescriptorHeaps(lengthOf(heaps), heaps);
 
-	if (!createSwapchain((HWND)hwnd, d3d->windows[0])) return false;
+	if (!createSwapchain((HWND)hwnd, d3d->windows[0], d3d->vsync)) return false;
 
 	for (SRV& h : d3d->current_srvs) {
 		h.texture = INVALID_TEXTURE;
@@ -1682,6 +1684,11 @@ bool getMemoryStats(MemoryStats& stats) {
 void setCurrentWindow(void* window_handle) {
 	checkThread();
 
+	bool vsync = []() {
+		MutexGuard guard(d3d->vsync_mutex);
+		return d3d->vsync;
+	}();
+
 	if (!window_handle) {
 		d3d->current_window = &d3d->windows[0];
 		d3d->current_window->last_used_frame = d3d->frame_number;
@@ -1706,7 +1713,7 @@ void setCurrentWindow(void* window_handle) {
 		GetClientRect((HWND)window_handle, &rect);
 		window.size = IVec2(rect.right - rect.left, rect.bottom - rect.top);
 
-		createSwapchain((HWND)window_handle, window);
+		createSwapchain((HWND)window_handle, window, vsync);
 		return;
 	}
 
@@ -1724,7 +1731,24 @@ void waitFrame(u32 frame_idx) {
 	f.wait();
 }
 
+bool isVSyncEnabled() {
+	MutexGuard guard(d3d->vsync_mutex);
+	return d3d->vsync;
+}
+
+void enableVSync(bool enable) {
+	MutexGuard guard(d3d->vsync_mutex);
+	d3d->vsync = enable;
+	d3d->vsync_dirty = true;
+}
+
 u32 swapBuffers() {
+	d3d->vsync_mutex.enter();
+	const bool vsync = d3d->vsync;
+	const bool vsync_dirty = d3d->vsync_dirty;
+	d3d->vsync_dirty = false;
+	d3d->vsync_mutex.exit();
+
 	d3d->dirty_samplers = true;
 	d3d->pso_cache.last = nullptr;
 	for (auto& window : d3d->windows) {
@@ -1779,7 +1803,19 @@ u32 swapBuffers() {
 		GetClientRect((HWND)window.handle, &rect);
 
 		const IVec2 size(rect.right - rect.left, rect.bottom - rect.top);
-		if (size != window.size && size.x != 0) {
+		if (vsync_dirty) {
+			for (Frame& f : d3d->frames) f.wait();
+
+			for (ID3D12Resource* res : window.backbuffers) {
+				res->Release();
+			}
+			window.swapchain->Release();
+			window.last_used_frame = 0;
+			if (!createSwapchain((HWND)window.handle, window, vsync)) {
+				logError("Failed to create swapchain");
+			}
+		}
+		else if ((size != window.size && size.x != 0)) {
 			window.size = size;
 			bool has_ds = false;
 
@@ -1789,7 +1825,7 @@ u32 swapBuffers() {
 				res->Release();
 			}
 
-			HRESULT hr = window.swapchain->ResizeBuffers(0, size.x, size.y, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (d3d->vsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING));
+			HRESULT hr = window.swapchain->ResizeBuffers(0, size.x, size.y, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | (vsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING));
 			ASSERT(hr == S_OK);
 
 			SIZE_T rtvDescriptorSize = d3d->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -1801,22 +1837,24 @@ u32 swapBuffers() {
 		}
 	}
 
-	for (auto& window : d3d->windows) {
-		if (!window.handle) continue;
-		if (window.last_used_frame + 1 != d3d->frame_number && &window != d3d->windows) continue;
+	if (!vsync_dirty) {
+		for (auto& window : d3d->windows) {
+			if (!window.handle) continue;
+			if (window.last_used_frame + 1 != d3d->frame_number && &window != d3d->windows) continue;
 
-		if (d3d->vsync) {
-			window.swapchain->Present(1, 0);
-		}
-		else {
-			window.swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
-		}
+			if (vsync) {
+				window.swapchain->Present(1, 0);
+			}
+			else {
+				window.swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+			}
 		
-		//DXGI_FRAME_STATISTICS stats;
-		//window.swapchain->GetFrameStatistics(&stats);
+			//DXGI_FRAME_STATISTICS stats;
+			//window.swapchain->GetFrameStatistics(&stats);
 
-		const UINT current_idx = window.swapchain->GetCurrentBackBufferIndex();
-		switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+			const UINT current_idx = window.swapchain->GetCurrentBackBufferIndex();
+			switchState(d3d->cmd_list, window.backbuffers[current_idx], D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		}
 	}
 
 	return frame_idx;
