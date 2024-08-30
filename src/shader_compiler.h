@@ -134,20 +134,41 @@ struct ShaderCompiler {
 		ASSERT(input.srcs.length() == input.types.length());
 		out[0] = getTypeDefine(type);
 		out[1] = "#define LUMIX_DX_SHADER\n";
+		out[2] = R"#(
+			#define TextureHandle int
+			#define TextureCubeArrayHandle int
+
+			Texture2D<float4> bindless_textures[] : register(t0, space1);
+			TextureCubeArray bindless_cube_arrays[] : register(t0, space2);
+			RWTexture2D<float4> bindless_rw_textures[] : register(u0, space0);
+			SamplerState LinearSampler : register(s0);
+
+			float4 sampleBindless(TextureHandle index, float2 uv) {
+				return bindless_textures[index].Sample(LinearSampler, uv);
+			}
+
+			float4 sampleBindlessLod(TextureHandle index, float2 uv, uint lod) {
+				return bindless_textures[index].SampleLevel(LinearSampler, uv, lod);
+			}
+
+			float4 sampleCubeArrayBindlessLod(TextureHandle index, float4 uv, uint lod) {
+				return bindless_cube_arrays[index].SampleLevel(LinearSampler, uv, lod);
+			}
+		)#";
 		for (u32 i = 0; i < input.decl.attributes_count; ++i) {
-			out[i + 2] = getAttrDefine(i); 
+			out[i + 3] = getAttrDefine(i); 
 		}
 		for(u32 i = 0; i < input.prefixes.length(); ++i) {
-			out[i + 2 + input.decl.attributes_count] = input.prefixes[i];
+			out[i + 3 + input.decl.attributes_count] = input.prefixes[i];
 		}
 
 		u32 sc = 0;
 		for(u32 i = 0; i < input.srcs.length(); ++i) {
 			if(input.types[i] != type) continue;
-			out[input.prefixes.length() + input.decl.attributes_count + sc + 2] = input.srcs[i];
+			out[input.prefixes.length() + input.decl.attributes_count + sc + 3] = input.srcs[i];
 			++sc;
 		}
-		return sc ? sc + input.prefixes.length() + input.decl.attributes_count + 2 : 0;
+		return sc ? sc + input.prefixes.length() + input.decl.attributes_count + 3 : 0;
 	};
 
 	static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, std::string& out, u32& readonly_bitset, u32& used_bitset) {
@@ -175,6 +196,10 @@ struct ShaderCompiler {
 		}
 		p.addShader(&shader);
 		auto res = p.link(EShMsgDefault);
+		if (!res) {
+			const char* info_log = p.getInfoLog();
+			logError(shader_name, ": ", info_log);
+		}
 		if (res2 && res) {
 			auto im = p.getIntermediate(lang);
 			std::vector<unsigned int> spirv;
@@ -189,7 +214,7 @@ struct ShaderCompiler {
 
 			spirv_cross::CompilerHLSL hlsl(spirv);
 			spirv_cross::CompilerHLSL::Options options;
-			options.shader_model = 50;
+			options.shader_model = 51;
 			hlsl.set_hlsl_options(options);
 
 			const spirv_cross::VariableID num_workgroups_builtin_id = hlsl.remap_num_workgroups_builtin();
@@ -198,6 +223,35 @@ struct ShaderCompiler {
 				return false;
 			}
 			out = hlsl.compile();
+
+			size_t idx0 = out.find("float4 sampleBindless(");
+			size_t idx1 = out.find("float4 sampleBindlessLod(");
+			if (idx0 != std::string::npos || idx1 != std::string::npos) {
+				if (idx0 != std::string::npos) out.insert(idx0 + 7, "_");
+				if (idx1 != std::string::npos) out.insert(idx1 + 7, "_");
+				out.insert(0, R"#(
+					#define TextureHandle int
+					#define TextureCubeArrayHandle int
+
+					Texture2D<float4> bindless_textures[] : register(t0, space1);
+					TextureCubeArray<float4> bindless_cube_arrays[] : register(t0, space2);
+					RWTexture2D<float4> bindless_rw_textures[] : register(u0, space0);
+
+					SamplerState LinearSampler : register(s0);
+
+					float4 sampleBindless(TextureHandle index, float2 uv) {
+						return bindless_textures[index].Sample(LinearSampler, uv);
+					}
+
+					float4 sampleBindlessLod(TextureHandle index, float2 uv, uint lod) {
+						return bindless_textures[index].SampleLevel(LinearSampler, uv, lod);
+					}
+
+					float4 sampleCubeArrayBindlessLod(TextureHandle index, float4 uv, uint lod) {
+						return bindless_cube_arrays[index].SampleLevel(LinearSampler, uv, lod);
+					}
+				)#");
+			}
 
 			spirv_cross::ShaderResources resources = hlsl.get_shader_resources(hlsl.get_active_interface_variables());
 		
@@ -255,8 +309,8 @@ struct ShaderCompiler {
 			NULL,
 			NULL,
 			"main",
-			type == ShaderType::VERTEX ? "vs_5_0" : (type == ShaderType::COMPUTE ? "cs_5_0" : "ps_5_0"),
-			D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_DEBUG,
+			type == ShaderType::VERTEX ? "vs_5_1" : (type == ShaderType::COMPUTE ? "cs_5_1" : "ps_5_1"),
+			D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_ENABLE_UNBOUNDED_DESCRIPTOR_TABLES | D3DCOMPILE_DEBUG,
 			0,
 			&output,
 			&errors);
@@ -264,19 +318,23 @@ struct ShaderCompiler {
 			if (SUCCEEDED(hr)) {
 				logInfo("gpu: ", (LPCSTR)errors->GetBufferPointer());
 			} else {
-				logError("gpu: ", (LPCSTR)errors->GetBufferPointer());
+				logError(name, ": ", (LPCSTR)errors->GetBufferPointer());
 			}
 			errors->Release();
 			if (FAILED(hr)) return nullptr;
 		}
 		ASSERT(output);
-		CachedShader cached(m_allocator);
-		cached.data.write(output->GetBufferPointer(), output->GetBufferSize());
-		cached.readonly_bitset = readonly_bitset;
-		cached.used_srvs_bitset = used_bitset;
-		m_cache.insert(hash, static_cast<CachedShader&&>(cached));
+		if (m_use_cache) {
+			CachedShader cached(m_allocator);
+			cached.data.write(output->GetBufferPointer(), output->GetBufferSize());
+			cached.readonly_bitset = readonly_bitset;
+			cached.used_srvs_bitset = used_bitset;
+			m_cache.insert(hash, static_cast<CachedShader&&>(cached));
+		}
 		return output;
 	};
+
+	bool m_use_cache = true;
 
 	void save(const char* filename) {
 		os::OutputFile file;
