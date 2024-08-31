@@ -151,6 +151,10 @@ struct ShaderCompiler {
 				return bindless_textures[index].SampleLevel(LinearSampler, uv, lod);
 			}
 
+			float4 sampleBindlessLodOffset(TextureHandle index, float2 uv, uint lod, int2 offset) {
+				return bindless_textures[index].SampleLevel(LinearSampler, uv, lod, offset);
+			}
+
 			float4 sampleCubeArrayBindlessLod(TextureHandle index, float4 uv, uint lod) {
 				return bindless_cube_arrays[index].SampleLevel(LinearSampler, uv, lod);
 			}
@@ -247,6 +251,10 @@ struct ShaderCompiler {
 						return bindless_textures[index].SampleLevel(LinearSampler, uv, lod);
 					}
 
+					float4 sampleBindlessLodOffset(TextureHandle index, float2 uv, uint lod, int2 offset) {
+						return bindless_textures[index].SampleLevel(LinearSampler, uv, lod, offset);
+					}
+
 					float4 sampleCubeArrayBindlessLod(TextureHandle index, float4 uv, uint lod) {
 						return bindless_cube_arrays[index].SampleLevel(LinearSampler, uv, lod);
 					}
@@ -310,7 +318,7 @@ struct ShaderCompiler {
 			NULL,
 			"main",
 			type == ShaderType::VERTEX ? "vs_5_1" : (type == ShaderType::COMPUTE ? "cs_5_1" : "ps_5_1"),
-			D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_ENABLE_UNBOUNDED_DESCRIPTOR_TABLES | D3DCOMPILE_DEBUG,
+			D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_ENABLE_UNBOUNDED_DESCRIPTOR_TABLES | D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
 			0,
 			&output,
 			&errors);

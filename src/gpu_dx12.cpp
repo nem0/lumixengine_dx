@@ -211,6 +211,8 @@ struct PSOCache {
 		auto iter = cache.find(hash);
 		if (iter.isValid()) return iter.value();
 
+		if (program->cs.size() == 0) return nullptr;
+
 		Program& p = *program;
 		D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
 		desc.CS = {p.cs.data(), p.cs.size()};
@@ -231,6 +233,7 @@ struct PSOCache {
 		, ID3D12RootSignature* root_signature)
 	{
 		ASSERT(program);
+
 		Program& p = *program;
 		RollingHasher hasher;
 		hasher.begin();
@@ -244,6 +247,8 @@ struct PSOCache {
 			last = iter.value();
 			return iter.value();
 		}
+
+		if (program->vs.size() + program->ps.size() + program->cs.size() + program->gs.size() == 0) return nullptr;
 
 		D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
 		if (p.vs.size() > 0) desc.VS = {p.vs.data(), p.vs.size()};
@@ -483,6 +488,7 @@ struct ShaderCompilerDX12 : ShaderCompiler {
 	}
 };
 
+// TODO actually use gpu::TextureHandle.flags 
 struct SamplerHeap {
 	void alloc(ID3D12Device* device, u32 id, TextureFlags flags) {
 		D3D12_SAMPLER_DESC desc = {};
@@ -514,7 +520,7 @@ struct SamplerHeap {
 		cpu_begin = heap->GetCPUDescriptorHandleForHeapStart();
 		max_count = num_descriptors;
 
-		alloc(device, 0, TextureFlags::NONE);
+		alloc(device, 0, TextureFlags::CLAMP_U | TextureFlags::CLAMP_W);
 
 		return true;
 	}
@@ -897,6 +903,26 @@ void* getDX12Resource(TextureHandle h) {
 	return h->resource;
 }
 
+void barrierWrite(TextureHandle texture) {
+	D3D12_RESOURCE_BARRIER barrier;
+	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrier.UAV.pResource = texture->resource;
+	d3d->cmd_list->ResourceBarrier(1, &barrier);
+
+	texture->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void barrierRead(TextureHandle texture) {
+	D3D12_RESOURCE_BARRIER barrier;
+	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrier.UAV.pResource = texture->resource;
+	d3d->cmd_list->ResourceBarrier(1, &barrier);
+
+	texture->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
+}
+
 void memoryBarrier(MemoryBarrierType type, BufferHandle buffer) {
 	D3D12_RESOURCE_BARRIER barrier;
 	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -1103,6 +1129,8 @@ void copy(BufferHandle dst_handle, TextureHandle src_handle) {
 	src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 	src.SubresourceIndex = 0;
 
+	const u32 bpp = getSize(src_handle->dxgi_format);
+
 	D3D12_TEXTURE_COPY_LOCATION dst = {};
 	dst.pResource = dst_handle->resource;
 	dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -1110,7 +1138,7 @@ void copy(BufferHandle dst_handle, TextureHandle src_handle) {
 	dst.PlacedFootprint.Footprint.Width = src_handle->w;
 	dst.PlacedFootprint.Footprint.Height = src_handle->h;
 	dst.PlacedFootprint.Footprint.Depth = 1;
-	dst.PlacedFootprint.Footprint.RowPitch = (src_handle->w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+	dst.PlacedFootprint.Footprint.RowPitch = (src_handle->w * bpp + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
 	dst.PlacedFootprint.Footprint.Format = src_handle->dxgi_format;
 
 	const D3D12_RESOURCE_STATES prev_state = src_handle->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -2210,40 +2238,52 @@ static void applyComputeUniformBlocks() {
 	d3d->dirty_compute_uniform_blocks = 0;
 }
 
-static void setPipelineStateCompute() {
+[[nodiscard]] static bool setPipelineStateCompute() {
 	if (g_last_pipeline_type != PipelineType::COMPUTE || g_last_program != d3d->current_program) {
-		d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineStateCompute(d3d->device, d3d->root_signature, d3d->current_program));
+		ID3D12PipelineState* pso = d3d->pso_cache.getPipelineStateCompute(d3d->device, d3d->root_signature, d3d->current_program);
+		#ifdef LUMIX_DEBUG
+			if (!pso) return false;
+		#endif
+		d3d->cmd_list->SetPipelineState(pso);
 		g_last_pipeline_type = PipelineType::COMPUTE;
 		g_last_program = d3d->current_program;
 		d3d->cmd_list->SetComputeRootDescriptorTable(BINDLESS_SRV_ROOT_PARAMETER_INDEX, d3d->srv_heap.gpu_begin);
 		d3d->cmd_list->SetComputeRootDescriptorTable(BINDLESS_SAMPLERS_ROOT_PARAMETER_INDEX, d3d->sampler_heap.gpu_begin);
 	}
 	applyComputeUniformBlocks();
+	return true;
 }
 
-static void setPipelineStateGraphics() {
+[[nodiscard]] static bool setPipelineStateGraphics() {
 	const u8 stencil_ref = u8(u64(d3d->current_program->state) >> 34);
 	d3d->cmd_list->OMSetStencilRef(stencil_ref);
 
-	d3d->cmd_list->SetPipelineState(d3d->pso_cache.getPipelineState(d3d->device, d3d->current_program, d3d->current_framebuffer, d3d->root_signature));
+	ID3D12PipelineState* pso = d3d->pso_cache.getPipelineState(d3d->device, d3d->current_program, d3d->current_framebuffer, d3d->root_signature);
+	#ifdef LUMIX_DEBUG
+		if (!pso) return false;
+	#endif
+	d3d->cmd_list->SetPipelineState(pso);
 	g_last_pipeline_type = PipelineType::GRAPHICS;
 	d3d->cmd_list->SetGraphicsRootDescriptorTable(BINDLESS_SRV_ROOT_PARAMETER_INDEX, d3d->srv_heap.gpu_begin);
 	d3d->cmd_list->SetGraphicsRootDescriptorTable(BINDLESS_SAMPLERS_ROOT_PARAMETER_INDEX, d3d->sampler_heap.gpu_begin);
 	applyGFXUniformBlocks();
+	return true;
 }
 
 void drawArraysInstanced(u32 indices_count, u32 instances_count) {
 	ASSERT(d3d->current_program);
-	setPipelineStateGraphics();
-	d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
-	d3d->cmd_list->DrawInstanced(indices_count, instances_count, 0, 0);
+	if (setPipelineStateGraphics()) {
+		d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
+		d3d->cmd_list->DrawInstanced(indices_count, instances_count, 0, 0);
+	}
 }
 
 void drawArrays(u32 offset, u32 count) {
 	ASSERT(d3d->current_program);
-	setPipelineStateGraphics();
-	d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
-	d3d->cmd_list->DrawInstanced(count, 1, offset, 0);
+	if (setPipelineStateGraphics()) {
+		d3d->cmd_list->IASetPrimitiveTopology(d3d->current_program->primitive_topology);
+		d3d->cmd_list->DrawInstanced(count, 1, offset, 0);
+	}
 }
 
 bool isOriginBottomLeft() {
@@ -2309,8 +2349,9 @@ void bindIndexBuffer(BufferHandle handle) {
 
 void dispatch(u32 num_groups_x, u32 num_groups_y, u32 num_groups_z) {
 	ASSERT(d3d->current_program);
-	setPipelineStateCompute();
-	d3d->cmd_list->Dispatch(num_groups_x, num_groups_y, num_groups_z);
+	if (setPipelineStateCompute()) {
+		d3d->cmd_list->Dispatch(num_groups_x, num_groups_y, num_groups_z);
+	}
 }
 
 void bindVertexBuffer(u32 binding_idx, BufferHandle buffer, u32 buffer_offset, u32 stride_in_bytes) {
@@ -2372,7 +2413,7 @@ u32 getBindlessHandle(TextureHandle texture) {
 
 void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 	ASSERT(d3d->current_program);
-	setPipelineStateGraphics();
+	if (!setPipelineStateGraphics()) return;
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2416,7 +2457,7 @@ void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
 void drawIndexedInstanced(u32 indices_count, u32 instances_count, DataType index_type) {
 
 	ASSERT(d3d->current_program);
-	setPipelineStateGraphics();
+	if (!setPipelineStateGraphics()) return;
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
@@ -2443,7 +2484,7 @@ void drawIndexedInstanced(u32 indices_count, u32 instances_count, DataType index
 }
 
 void drawIndexed(u32 offset_bytes, u32 count, DataType index_type) {
-	setPipelineStateGraphics();
+	if (!setPipelineStateGraphics()) return;
 
 	DXGI_FORMAT dxgi_index_type;
 	u32 offset_shift = 0;
