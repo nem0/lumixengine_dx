@@ -918,6 +918,26 @@ void* getDX12Resource(TextureHandle h) {
 	return h->resource;
 }
 
+void barrierWrite(BufferHandle buffer) {
+	D3D12_RESOURCE_BARRIER barrier;
+	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrier.UAV.pResource = buffer->resource;
+	d3d->cmd_list->ResourceBarrier(1, &barrier);
+
+	buffer->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void barrierRead(BufferHandle buffer) {
+	D3D12_RESOURCE_BARRIER barrier;
+	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrier.UAV.pResource = buffer->resource;
+	d3d->cmd_list->ResourceBarrier(1, &barrier);
+
+	buffer->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_GENERIC_READ);
+}
+
 void barrierWrite(TextureHandle texture) {
 	D3D12_RESOURCE_BARRIER barrier;
 	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -1398,7 +1418,8 @@ ID3D12RootSignature* createRootSignature() {
 		{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 2, 0},
 		{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 3, 0},
 		{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 4, 0},
-		{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, (UINT)-1, 0, 0, 0}
+		{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, (UINT)-1, 0, 0, 0},
+		{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, (UINT)-1, 0, 1, 0}
 	};
 
 	D3D12_DESCRIPTOR_RANGE srv_desc_range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 16, 0, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND};
@@ -1931,7 +1952,6 @@ void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const voi
 	ASSERT(!buffer->resource);
 	ASSERT(size < UINT_MAX);
 	buffer->size = (u32)size;
-	const bool staging = u32(flags & BufferFlags::STAGING);
 	const bool mappable = u32(flags & BufferFlags::MAPPABLE);
 	const bool shader_buffer = u32(flags & BufferFlags::SHADER_BUFFER);
 	if (shader_buffer) {
@@ -1939,7 +1959,7 @@ void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const voi
 	}	
 
 	D3D12_HEAP_PROPERTIES props = {};
-	props.Type = staging ? D3D12_HEAP_TYPE_READBACK : mappable ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT;
+	props.Type = mappable ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT;
 	props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 
@@ -2445,6 +2465,10 @@ void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 
 u32 getBindlessHandle(TextureHandle texture) {
 	return texture->heap_id;
+}
+
+u32 getBindlessHandle(BufferHandle buffer) {
+	return buffer->heap_id;
 }
 
 void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {

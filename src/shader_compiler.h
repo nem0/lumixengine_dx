@@ -143,6 +143,7 @@ struct ShaderCompiler {
 			Texture2DArray bindless_2D_arrays[] : register(t0, space3);
 			TextureCube bindless_cubemaps[] : register(t0, space4);
 			RWTexture2D<float4> bindless_rw_textures[] : register(u0, space0);
+			RWByteAddressBuffer bindless_rw_buffers[] : register(u0, space1);
 
 			SamplerState LinearSamplerClamp : register(s0);
 			SamplerState LinearSampler : register(s1);
