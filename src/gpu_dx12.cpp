@@ -93,6 +93,10 @@ static DXGI_FORMAT toDSViewFormat(DXGI_FORMAT format) {
 	}
 }
 
+static u32 calcSubresource(u32 mip, u32 array, u32 mip_count) {
+	return mip + array * mip_count;
+}
+
 static void switchState(ID3D12GraphicsCommandList* cmd_list, ID3D12Resource* resource, D3D12_RESOURCE_STATES old_state, D3D12_RESOURCE_STATES new_state) {
 	D3D12_RESOURCE_BARRIER barrier;
 	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -503,7 +507,7 @@ struct SamplerHeap {
 		desc.MaxAnisotropy = is_aniso ? 8 : 1;
 		desc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
 		D3D12_CPU_DESCRIPTOR_HANDLE cpu = cpu_begin;
-		cpu.ptr += increment * id / 2;
+		cpu.ptr += increment * id;
 		device->CreateSampler(&desc, cpu);
 	}
 
@@ -521,6 +525,7 @@ struct SamplerHeap {
 		max_count = num_descriptors;
 
 		alloc(device, 0, TextureFlags::CLAMP_U | TextureFlags::CLAMP_W);
+		alloc(device, 1, TextureFlags::NONE);
 
 		return true;
 	}
@@ -674,7 +679,7 @@ struct RTVDSVHeap {
 		frame = (frame + 1) % NUM_BACKBUFFERS;
 	}
 
-	D3D12_CPU_DESCRIPTOR_HANDLE allocRTV(ID3D12Device* device, ID3D12Resource* resource) {
+	D3D12_CPU_DESCRIPTOR_HANDLE allocRTV(ID3D12Device* device, ID3D12Resource* resource, D3D12_RENDER_TARGET_VIEW_DESC* view_desc = nullptr) {
 		ASSERT(resource);
 		ASSERT(num_resources + 1 <= max_resource_count);
 
@@ -682,7 +687,7 @@ struct RTVDSVHeap {
 		cpu.ptr += (max_resource_count * frame + num_resources) * handle_increment_size;
 		++num_resources;
 
-		device->CreateRenderTargetView(resource, nullptr, cpu);
+		device->CreateRenderTargetView(resource, view_desc, cpu);
 		return cpu;
 	}
 
@@ -751,11 +756,20 @@ static ID3D12Resource* createBuffer(ID3D12Device* device, const void* data, u64 
 }
 
 struct Frame {
+	struct TextureRead {
+		ID3D12Resource* staging;
+		TextureReadCallback callback;
+		D3D12_PLACED_SUBRESOURCE_FOOTPRINT layouts[16 * 6];
+		u32 num_layouts;
+		u32 dst_total_bytes;
+	};
+
 	Frame(IAllocator& allocator)
 		: to_release(allocator)
 		, to_heap_release(allocator)
 		, to_resolve(allocator)
 		, to_resolve_stats(allocator)
+		, texture_reads(allocator)
 	{}
 
 	void clear();
@@ -821,6 +835,7 @@ struct Frame {
 	u64 fence_value = 0;
 	Array<Query*> to_resolve;
 	Array<Query*> to_resolve_stats;
+	Array<TextureRead> texture_reads;
 	ID3D12Resource* timestamp_query_buffer;
 	ID3D12Resource* stats_query_buffer;
 	u8* timestamp_query_buffer_ptr;
@@ -956,6 +971,28 @@ void Frame::begin() {
 	for (u32 i : to_heap_release) d3d->srv_heap.free(i);
 	to_release.clear();
 	to_heap_release.clear();
+
+	for (const TextureRead& read : texture_reads) {
+		u8* src = nullptr; 
+		HRESULT hr = read.staging->Map(0, nullptr, (void**)&src);
+		if (src && hr == S_OK) {
+			u8* dst = (u8*)d3d->allocator.allocate(read.dst_total_bytes, 16);
+			u8* dst_start = dst;
+			for (u32 i = 0; i < read.num_layouts; ++i) {
+				const auto& footprint = read.layouts[i].Footprint;
+				u32 dst_row_size = footprint.Height * getSize(footprint.Format);
+				for (u32 row = 0; row < footprint.Height; ++row) {
+					memcpy(dst, src + read.layouts[i].Offset + row * footprint.RowPitch, dst_row_size);
+					dst += dst_row_size;
+				}
+			}
+			read.callback.invoke(Span(dst_start, read.dst_total_bytes));
+			d3d->allocator.deallocate(dst_start);
+			read.staging->Unmap(0, nullptr);
+		}
+		read.staging->Release();
+	}
+	texture_reads.clear();
 }
 
 void Frame::clear() {
@@ -1059,12 +1096,6 @@ void destroy(QueryHandle query) {
 	LUMIX_DELETE(d3d->allocator, query);
 }
 
-void generateMipmaps(TextureHandle handle) {
-	// Texture& t = d3d->textures[handle.value];
-	// d3d->device_ctx->GenerateMips(t.srv);
-	ASSERT(false); // TODO
-}
-
 void update(TextureHandle texture, u32 mip, u32 x, u32 y, u32 z, u32 w, u32 h, TextureFormat format, const void* buf, u32 buf_size) {
 	const D3D12_RESOURCE_STATES prev_state = texture->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
 
@@ -1118,33 +1149,52 @@ void update(TextureHandle texture, u32 mip, u32 x, u32 y, u32 z, u32 w, u32 h, T
 	d3d->frame->to_release.push(staging);
 }
 
-u32 getFootprintRowPitch(TextureFormat format, u32 width_pixels) {
-	const FormatDesc& fd = FormatDesc::get(format);
-	return (width_pixels * fd.block_bytes + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
-}
-
 void copy(BufferHandle dst_handle, TextureHandle src_handle) {
-	D3D12_TEXTURE_COPY_LOCATION src = {};
-	src.pResource = src_handle->resource;
-	src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-	src.SubresourceIndex = 0;
+	D3D12_RESOURCE_DESC desc = src_handle->resource->GetDesc();
 
-	const u32 bpp = getSize(src_handle->dxgi_format);
+	D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout;
+	u32 num_rows;
+	u64 total;
+	d3d->device->GetCopyableFootprints(&desc
+		, calcSubresource(0, 0, desc.MipLevels)
+		, 1
+		, 0
+		, &layout
+		, &num_rows
+		, NULL
+		, &total
+	);
+	u32 src_pitch = layout.Footprint.RowPitch;
 
-	D3D12_TEXTURE_COPY_LOCATION dst = {};
-	dst.pResource = dst_handle->resource;
-	dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-	dst.PlacedFootprint.Offset = 0;
-	dst.PlacedFootprint.Footprint.Width = src_handle->w;
-	dst.PlacedFootprint.Footprint.Height = src_handle->h;
-	dst.PlacedFootprint.Footprint.Depth = 1;
-	dst.PlacedFootprint.Footprint.RowPitch = (src_handle->w * bpp + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
-	dst.PlacedFootprint.Footprint.Format = src_handle->dxgi_format;
+	D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
+	srcLocation.pResource = src_handle->resource;
+	srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	bool is_cubemap = isFlagSet(src_handle->flags, gpu::TextureFlags::IS_CUBE);
+	bool no_mips = isFlagSet(src_handle->flags, gpu::TextureFlags::NO_MIPS);
 
-	const D3D12_RESOURCE_STATES prev_state = src_handle->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
-	dst_handle->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_DEST);
-	d3d->cmd_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-	src_handle->setState(d3d->cmd_list, prev_state);
+	D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
+	dstLocation.pResource = dst_handle->resource;
+	dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+
+	dstLocation.PlacedFootprint = layout;
+	dstLocation.PlacedFootprint.Offset = 0;
+	
+	const u32 src_mip_count = no_mips ? 1 : 1 + log2(maximum(src_handle->w, src_handle->h));
+
+	for (int i = 0; i < (is_cubemap ? 6 : 1); ++i) {
+		srcLocation.SubresourceIndex = calcSubresource(0, i, src_mip_count);
+		dstLocation.PlacedFootprint.Offset = i * src_pitch * src_handle->h;
+
+		D3D12_BOX box;
+		box.left = 0;
+		box.top = 0;
+		box.right = (u32)desc.Width;
+		box.bottom = (u32)desc.Height;
+		box.front = 0;
+		box.back = 1;
+
+		d3d->cmd_list->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, &box);
+	}
 }
 
 void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
@@ -1194,57 +1244,64 @@ void copy(TextureHandle dst, TextureHandle src, u32 dst_x, u32 dst_y) {
 	dst->setState(d3d->cmd_list, dst_prev_state);
 }
 
-// TODO do not use this, it syncs cpu and gpu
-void readBuffer(BufferHandle handle, Span<u8> buf) {
-	HRESULT hr = d3d->cmd_list->Close();
-	d3d->cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&d3d->cmd_list);
+void readTexture(TextureHandle texture, TextureReadCallback callback) {
+	const D3D12_RESOURCE_DESC desc = texture->resource->GetDesc();
+	bool is_cubemap = isFlagSet(texture->flags, gpu::TextureFlags::IS_CUBE);
 
-	ID3D12Fence* fence = nullptr;
-	HRESULT res = d3d->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
-	ASSERT(res == S_OK);
-	u64 fenceValue = 1;
-	d3d->cmd_queue->Signal(fence, fenceValue);
-	if (fence->GetCompletedValue() < fenceValue) {
-		HANDLE fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-		fence->SetEventOnCompletion(fenceValue, fenceEvent);
-		WaitForSingleObject(fenceEvent, INFINITE);
-		CloseHandle(fenceEvent);
-	}
-	fence->Release();
-	
-	void* mem = gpu::map(handle, buf.length());
-	if (mem) {
-		memcpy(buf.begin(), mem, buf.length());
-		gpu::unmap(handle);
-	}
+	u64 face_bytes = 0;
+	D3D12_PLACED_SUBRESOURCE_FOOTPRINT layouts[16 * 6];
+	ASSERT(desc.MipLevels <= (int)lengthOf(layouts));
+	d3d->device->GetCopyableFootprints(&desc
+		, 0
+		, desc.MipLevels * desc.DepthOrArraySize 
+		, 0
+		, layouts
+		, nullptr
+		, nullptr
+		, &face_bytes
+	);
 
-	d3d->cmd_list->Reset(d3d->frame->cmd_allocator, nullptr);
-	d3d->cmd_list->SetGraphicsRootSignature(d3d->root_signature);
-	d3d->cmd_list->SetComputeRootSignature(d3d->root_signature);
-	ID3D12DescriptorHeap* heaps[] = { d3d->srv_heap.heap, d3d->sampler_heap.heap };
-	d3d->cmd_list->SetDescriptorHeaps(lengthOf(heaps), heaps);
-}
+	ID3D12Resource* staging = createBuffer(d3d->device, nullptr, face_bytes * (is_cubemap ? 6 : 1), D3D12_HEAP_TYPE_READBACK);
+	const D3D12_RESOURCE_STATES prev_state = texture->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	
+	D3D12_TEXTURE_COPY_LOCATION src_location = {};
+	src_location.pResource = texture->resource;
+	src_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 
-void readTexture(TextureHandle texture, u32 mip, Span<u8> buf) {
-	ASSERT(texture);
-	
-	const u32 faces = u32(texture->flags & TextureFlags::IS_CUBE) ? 6 : 1;
-	const bool no_mips = u32(texture->flags & TextureFlags::NO_MIPS);
-	const u32 mip_count = no_mips ? 1 : 1 + log2(maximum(texture->w, texture->h));
-	u8* ptr = buf.begin();
-	const FormatDesc& fd = FormatDesc::get(texture->dxgi_format);
-	
-	for (u32 face = 0; face < faces; ++face) {
-		const UINT subres = mip + face * mip_count;
-		void* data;
-		texture->resource->Map(subres, nullptr, &data);
-		u32 size = fd.getRowPitch(maximum(1, texture->w >> mip));
-		if (fd.compressed) size *= (texture->h + 3) / 4;
-		else size *= texture->h;
-		memcpy(ptr, data, size);
-		ptr += size;
-		texture->resource->Unmap(mip, nullptr);
+	D3D12_TEXTURE_COPY_LOCATION dst_location = {};
+	dst_location.pResource = staging;
+	dst_location.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+
+	for (int face = 0; face < (is_cubemap ? 6 : 1); ++face) {
+		for (u32 mip = 0; mip < desc.MipLevels; ++mip) {
+			src_location.SubresourceIndex = calcSubresource(mip, face, desc.MipLevels);
+			const auto& layout = layouts[src_location.SubresourceIndex];
+			dst_location.PlacedFootprint = layout;
+			//dst_location.PlacedFootprint.Offset += face * face_bytes;
+
+			D3D12_BOX box;
+			box.left = 0;
+			box.top = 0;
+			box.right = layout.Footprint.Width;
+			box.bottom = layout.Footprint.Height;
+			box.front = 0;
+			box.back = 1;
+
+			d3d->cmd_list->CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, nullptr);
+		}
 	}
+	texture->setState(d3d->cmd_list, prev_state);
+
+	Frame::TextureRead& wait = d3d->frame->texture_reads.emplace();
+	wait.staging = staging;
+	wait.callback = callback;
+	wait.num_layouts = desc.DepthOrArraySize * desc.MipLevels;
+	wait.dst_total_bytes = 0;
+	for (u32 mip = 0; mip < desc.MipLevels; ++mip) {
+		const auto& footprint = layouts[mip].Footprint;
+		wait.dst_total_bytes += u32(footprint.Width * footprint.Height * desc.DepthOrArraySize * getSize(desc.Format));
+	}
+	memcpy(wait.layouts, layouts, sizeof(layouts[0]) * wait.num_layouts);
 }
 
 void beginQuery(QueryHandle query) {
@@ -1340,6 +1397,7 @@ ID3D12RootSignature* createRootSignature() {
 		{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 1, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
 		{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 2, 0},
 		{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 3, 0},
+		{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 4, 0},
 		{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, (UINT)-1, 0, 0, 0}
 	};
 
@@ -1594,45 +1652,23 @@ void popDebugGroup() {
 
 void setFramebufferCube(TextureHandle cube, u32 face, u32 mip) {
 	d3d->pso_cache.last = nullptr;
-	// d3d->current_framebuffer.count = 0;
-	// d3d->current_framebuffer.depth_stencil = nullptr;
-	// Texture& t = d3d->textures[cube.value];
-	// if (t.rtv && (t.rtv_face != face || t.rtv_mip) != mip) {
-	//	t.rtv->Release();
-	//	t.rtv = nullptr;
-	//}
-	// if(!t.rtv) {
-	//	D3D11_RENDER_TARGET_VIEW_DESC desc = {};
-	//	desc.Format = t.dxgi_format;
-	//	desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
-	//	desc.Texture2DArray.MipSlice = mip;
-	//	desc.Texture2DArray.ArraySize = 1;
-	//	desc.Texture2DArray.FirstArraySlice = face;
-	//	d3d->device->CreateRenderTargetView((ID3D11Resource*)t.texture2D, &desc,
-	//&t.rtv);
-	//}
-	// ASSERT(d3d->current_framebuffer.count <
-	// (u32)lengthOf(d3d->current_framebuffer.render_targets));
-	// d3d->current_framebuffer.render_targets[d3d->current_framebuffer.count] =
-	// t.rtv;
-	//
-	// ID3D11ShaderResourceView* tmp[16] = {};
-	// d3d->device_ctx->VSGetShaderResources(0, lengthOf(tmp), tmp);
-	// for (ID3D11ShaderResourceView*& srv : tmp) {
-	//	if (t.srv == srv) {
-	//		const u32 idx = u32(&srv - tmp);
-	//		ID3D11ShaderResourceView* empty = nullptr;
-	//		d3d->device_ctx->VSSetShaderResources(idx, 1, &empty);
-	//		d3d->device_ctx->PSSetShaderResources(idx, 1, &empty);
-	//	}
-	//}
-	//
-	//++d3d->current_framebuffer.count;
-	//
-	// d3d->device_ctx->OMSetRenderTargets(d3d->current_framebuffer.count,
-	// d3d->current_framebuffer.render_targets,
-	// d3d->current_framebuffer.depth_stencil);
-	ASSERT(false); // TODO
+	D3D12_CPU_DESCRIPTOR_HANDLE rt;
+
+	D3D12_RENDER_TARGET_VIEW_DESC desc = {};
+	desc.Format = cube->dxgi_format;
+	desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+	desc.Texture2DArray.MipSlice = mip;
+	desc.Texture2DArray.ArraySize = 1;
+	desc.Texture2DArray.FirstArraySlice = face;
+
+	rt = d3d->rtv_heap.allocRTV(d3d->device, cube->resource, &desc);
+	d3d->current_framebuffer.count = 1;
+	d3d->current_framebuffer.formats[0] = cube->dxgi_format;
+	d3d->current_framebuffer.render_targets[0] = rt;
+	d3d->current_framebuffer.depth_stencil = {};
+	d3d->current_framebuffer.ds_format = DXGI_FORMAT_UNKNOWN;
+	cube->setState(d3d->cmd_list, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	d3d->cmd_list->OMSetRenderTargets(1, &rt, FALSE, nullptr);
 }
 
 void setFramebuffer(const TextureHandle* attachments, u32 num, TextureHandle depth_stencil, FramebufferFlags flags) {

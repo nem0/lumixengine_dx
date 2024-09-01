@@ -140,24 +140,19 @@ struct ShaderCompiler {
 
 			Texture2D<float4> bindless_textures[] : register(t0, space1);
 			TextureCubeArray bindless_cube_arrays[] : register(t0, space2);
+			Texture2DArray bindless_2D_arrays[] : register(t0, space3);
+			TextureCube bindless_cubemaps[] : register(t0, space4);
 			RWTexture2D<float4> bindless_rw_textures[] : register(u0, space0);
-			SamplerState LinearSampler : register(s0);
 
-			float4 sampleBindless(TextureHandle index, float2 uv) {
-				return bindless_textures[index].Sample(LinearSampler, uv);
-			}
+			SamplerState LinearSamplerClamp : register(s0);
+			SamplerState LinearSampler : register(s1);
 
-			float4 sampleBindlessLod(TextureHandle index, float2 uv, uint lod) {
-				return bindless_textures[index].SampleLevel(LinearSampler, uv, lod);
-			}
-
-			float4 sampleBindlessLodOffset(TextureHandle index, float2 uv, uint lod, int2 offset) {
-				return bindless_textures[index].SampleLevel(LinearSampler, uv, lod, offset);
-			}
-
-			float4 sampleCubeArrayBindlessLod(TextureHandle index, float4 uv, uint lod) {
-				return bindless_cube_arrays[index].SampleLevel(LinearSampler, uv, lod);
-			}
+			#define sampleCubeBindlessLod(sampler, index, uv, lod) bindless_cubemaps[index].Sample((sampler), (uv), (lod))
+			#define sampleCubeBindless(sampler, index, uv) bindless_cubemaps[index].Sample((sampler), (uv))
+			#define sampleBindless(sampler, index, uv) bindless_textures[index].Sample((sampler), (uv))
+			#define sampleBindlessLod(sampler, index, uv, lod) bindless_textures[index].SampleLevel((sampler), (uv), (lod))
+			#define sampleBindlessLodOffset(sampler, index, uv, lod, offset) bindless_textures[index].SampleLevel((sampler), (uv), (lod), (offset))
+			#define sampleCubeArrayBindlessLod(sampler, index, uv, lod) bindless_cube_arrays[index].SampleLevel((sampler), (uv), (lod))
 		)#";
 		for (u32 i = 0; i < input.decl.attributes_count; ++i) {
 			out[i + 3] = getAttrDefine(i); 
@@ -174,130 +169,6 @@ struct ShaderCompiler {
 		}
 		return sc ? sc + input.prefixes.length() + input.decl.attributes_count + 3 : 0;
 	};
-
-	static bool glsl2hlsl(const char** srcs, u32 count, ShaderType type, const char* shader_name, std::string& out, u32& readonly_bitset, u32& used_bitset) {
-		readonly_bitset = 0xffFFffFF;
-		glslang::TProgram p;
-		EShLanguage lang = EShLangVertex;
-		switch (type) {
-			case ShaderType::COMPUTE: lang = EShLangCompute; break;
-			case ShaderType::FRAGMENT: lang = EShLangFragment; break;
-			case ShaderType::VERTEX: lang = EShLangVertex; break;
-			case ShaderType::GEOMETRY: lang = EShLangGeometry; break;
-			default: ASSERT(false); break;
-		}
-
-		glslang::TShader shader(lang);
-		shader.setAutoMapLocations(true);
-		shader.setStrings(srcs, count);
-		shader.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientOpenGL, 430);
-		shader.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetClientVersion::EShTargetOpenGL_450);
-		shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetLanguageVersion::EShTargetSpv_1_4);
-		auto res2 = shader.parse(&DefaultTBuiltInResource, 430, false, EShMsgDefault);
-		const char* log = shader.getInfoLog();
-		if (!res2) {
-			logError(shader_name, ": ", log);
-		}
-		p.addShader(&shader);
-		auto res = p.link(EShMsgDefault);
-		if (!res) {
-			const char* info_log = p.getInfoLog();
-			logError(shader_name, ": ", info_log);
-		}
-		if (res2 && res) {
-			auto im = p.getIntermediate(lang);
-			std::vector<unsigned int> spirv;
-			spv::SpvBuildLogger logger;
-			glslang::SpvOptions spvOptions;
-			spvOptions.generateDebugInfo = true;
-			spvOptions.disableOptimizer = true;
-			spvOptions.optimizeSize = false;
-			spvOptions.disassemble = false;
-			spvOptions.validate = true;
-			glslang::GlslangToSpv(*im, spirv, &logger, &spvOptions);
-
-			spirv_cross::CompilerHLSL hlsl(spirv);
-			spirv_cross::CompilerHLSL::Options options;
-			options.shader_model = 51;
-			hlsl.set_hlsl_options(options);
-
-			const spirv_cross::VariableID num_workgroups_builtin_id = hlsl.remap_num_workgroups_builtin();
-			if (num_workgroups_builtin_id != spirv_cross::VariableID(0)) {
-				logError(shader_name, ": there's no hlsl equivalent to gl_NumWorkGroups, use user-provided uniforms instead.");
-				return false;
-			}
-			out = hlsl.compile();
-
-			size_t idx0 = out.find("float4 sampleBindless(");
-			size_t idx1 = out.find("float4 sampleBindlessLod(");
-			if (idx0 != std::string::npos || idx1 != std::string::npos) {
-				if (idx0 != std::string::npos) out.insert(idx0 + 7, "_");
-				if (idx1 != std::string::npos) out.insert(idx1 + 7, "_");
-				out.insert(0, R"#(
-					#define TextureHandle int
-					#define TextureCubeArrayHandle int
-
-					Texture2D<float4> bindless_textures[] : register(t0, space1);
-					TextureCubeArray<float4> bindless_cube_arrays[] : register(t0, space2);
-					RWTexture2D<float4> bindless_rw_textures[] : register(u0, space0);
-
-					SamplerState LinearSampler : register(s0);
-
-					float4 sampleBindless(TextureHandle index, float2 uv) {
-						return bindless_textures[index].Sample(LinearSampler, uv);
-					}
-
-					float4 sampleBindlessLod(TextureHandle index, float2 uv, uint lod) {
-						return bindless_textures[index].SampleLevel(LinearSampler, uv, lod);
-					}
-
-					float4 sampleBindlessLodOffset(TextureHandle index, float2 uv, uint lod, int2 offset) {
-						return bindless_textures[index].SampleLevel(LinearSampler, uv, lod, offset);
-					}
-
-					float4 sampleCubeArrayBindlessLod(TextureHandle index, float4 uv, uint lod) {
-						return bindless_cube_arrays[index].SampleLevel(LinearSampler, uv, lod);
-					}
-				)#");
-			}
-
-			spirv_cross::ShaderResources resources = hlsl.get_shader_resources(hlsl.get_active_interface_variables());
-		
-			for (spirv_cross::Resource& resource : resources.storage_buffers) {
-				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
-				spirv_cross::Bitset flags = hlsl.get_buffer_block_flags(resource.id);
-				used_bitset |= 1 << binding;
-				const bool readonly = flags.get(spv::DecorationNonWritable);
-				if (readonly) {
-					readonly_bitset |= 1 << binding;
-				}
-				else {
-					readonly_bitset &= ~(1 << binding);
-				}
-			}
-
-			for (spirv_cross::Resource& resource : resources.sampled_images) {
-				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
-				used_bitset |= 1 << binding;
-			}
-
-			for (spirv_cross::Resource& resource : resources.storage_images) {
-				const u32 binding = hlsl.get_decoration(resource.id, spv::DecorationBinding);
-				spirv_cross::Bitset flags = hlsl.get_decoration_bitset(resource.id);
-				used_bitset |= 1 << binding;
-				const bool readonly = flags.get(spv::DecorationNonWritable);
-				if (readonly) {
-					readonly_bitset |= 1 << binding;
-				}
-				else {
-					readonly_bitset &= ~(1 << binding);
-				}
-			}
-
-			return true;
-		}
-		return false;
-	}
 
 	static StableHash32 computeHash(const char** srcs, u32 count) {
 		RollingStableHasher hasher;
