@@ -152,6 +152,7 @@ struct ShaderCompiler {
 			#define sampleCubeBindless(sampler, index, uv) bindless_cubemaps[index].Sample((sampler), (uv))
 			#define sampleBindless(sampler, index, uv) bindless_textures[index].Sample((sampler), (uv))
 			#define sampleBindlessLod(sampler, index, uv, lod) bindless_textures[index].SampleLevel((sampler), (uv), (lod))
+			#define sampleBindlessOffset(sampler, index, uv, offset) bindless_textures[index].Sample((sampler), (uv), (offset))
 			#define sampleBindlessLodOffset(sampler, index, uv, lod, offset) bindless_textures[index].SampleLevel((sampler), (uv), (lod), (offset))
 			#define sampleCubeArrayBindlessLod(sampler, index, uv, lod) bindless_cube_arrays[index].SampleLevel((sampler), (uv), (lod))
 		)#";

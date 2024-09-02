@@ -45,6 +45,8 @@
 #pragma comment(lib, "WinPixEventRuntime.lib")
 #include "pix3.h"
 
+// TODO fix FSR
+
 namespace Lumix {
 namespace gpu {
 
@@ -524,7 +526,7 @@ struct SamplerHeap {
 		cpu_begin = heap->GetCPUDescriptorHandleForHeapStart();
 		max_count = num_descriptors;
 
-		alloc(device, 0, TextureFlags::CLAMP_U | TextureFlags::CLAMP_W);
+		alloc(device, 0, TextureFlags::CLAMP_U | TextureFlags::CLAMP_V);
 		alloc(device, 1, TextureFlags::NONE);
 
 		return true;
@@ -759,6 +761,7 @@ struct Frame {
 	struct TextureRead {
 		ID3D12Resource* staging;
 		TextureReadCallback callback;
+		// TODO size
 		D3D12_PLACED_SUBRESOURCE_FOOTPRINT layouts[16 * 6];
 		u32 num_layouts;
 		u32 dst_total_bytes;
@@ -1953,7 +1956,7 @@ void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const voi
 	ASSERT(size < UINT_MAX);
 	buffer->size = (u32)size;
 	const bool mappable = u32(flags & BufferFlags::MAPPABLE);
-	const bool shader_buffer = u32(flags & BufferFlags::SHADER_BUFFER);
+	const bool shader_buffer = isFlagSet(flags, BufferFlags::SHADER_BUFFER) || isFlagSet(flags, BufferFlags::COMPUTE_WRITE);
 	if (shader_buffer) {
 		size = ((size + 15) / 16) * 16;
 	}	
