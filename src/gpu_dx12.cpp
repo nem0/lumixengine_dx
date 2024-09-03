@@ -803,30 +803,7 @@ struct Frame {
 	}
 
 	void begin();
-
-	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12QueryHeap* timestamp_query_heap, ID3D12QueryHeap* stats_query_heap) {
-		timestamp_query_buffer->Unmap(0, nullptr);
-		for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
-			QueryHandle q = to_resolve[i];
-			cmd_list->ResolveQueryData(timestamp_query_heap, D3D12_QUERY_TYPE_TIMESTAMP, q->idx, 1, timestamp_query_buffer, i * 8);
-		}
-
-		stats_query_buffer->Unmap(0, nullptr);
-		for (u32 i = 0, c = to_resolve_stats.size(); i < c; ++i) {
-			QueryHandle q = to_resolve_stats[i];
-			cmd_list->ResolveQueryData(stats_query_heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, q->idx, 1, stats_query_buffer, i * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
-		}
-
-		HRESULT hr = cmd_list->Close();
-		ASSERT(hr == S_OK);
-		hr = cmd_queue->Wait(fence, fence_value);
-		ASSERT(hr == S_OK);
-		cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmd_list);
-
-		++fence_value;
-		hr = cmd_queue->Signal(fence, fence_value);
-		ASSERT(hr == S_OK);
-	}
+	void end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12QueryHeap* timestamp_query_heap, ID3D12QueryHeap* stats_query_heap);
 
 	ID3D12Resource* scratch_buffer = nullptr;
 	u8* scratch_buffer_ptr = nullptr;
@@ -843,6 +820,7 @@ struct Frame {
 	ID3D12Resource* stats_query_buffer;
 	u8* timestamp_query_buffer_ptr;
 	u8* stats_query_buffer_ptr;
+	bool capture_requested = false;
 };
 
 struct SRV {
@@ -969,6 +947,48 @@ void memoryBarrier(MemoryBarrierType type, BufferHandle buffer) {
 	d3d->cmd_list->ResourceBarrier(1, &barrier);
 }
 
+void Frame::end(ID3D12CommandQueue* cmd_queue, ID3D12GraphicsCommandList* cmd_list, ID3D12QueryHeap* timestamp_query_heap, ID3D12QueryHeap* stats_query_heap) {
+	timestamp_query_buffer->Unmap(0, nullptr);
+	for (u32 i = 0, c = to_resolve.size(); i < c; ++i) {
+		QueryHandle q = to_resolve[i];
+		cmd_list->ResolveQueryData(timestamp_query_heap, D3D12_QUERY_TYPE_TIMESTAMP, q->idx, 1, timestamp_query_buffer, i * 8);
+	}
+
+	stats_query_buffer->Unmap(0, nullptr);
+	for (u32 i = 0, c = to_resolve_stats.size(); i < c; ++i) {
+		QueryHandle q = to_resolve_stats[i];
+		cmd_list->ResolveQueryData(stats_query_heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, q->idx, 1, stats_query_buffer, i * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+	}
+
+	HRESULT hr = cmd_list->Close();
+	ASSERT(hr == S_OK);
+	hr = cmd_queue->Wait(fence, fence_value);
+	ASSERT(hr == S_OK);
+	if (capture_requested) {
+		if (d3d->rdoc_api) {
+			if (!d3d->rdoc_api->IsRemoteAccessConnected()) {
+				d3d->rdoc_api->LaunchReplayUI(1, "");
+			}
+			d3d->rdoc_api->TriggerCapture();
+		}
+		else if (PIXIsAttachedForGpuCapture()) {
+			PIXBeginCapture2(PIX_CAPTURE_GPU, nullptr);
+		}
+	}
+	cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmd_list);
+	if (capture_requested) {
+		if (PIXIsAttachedForGpuCapture()) {
+			PIXEndCapture(FALSE);
+		}
+		capture_requested = false;
+	}
+
+
+	++fence_value;
+	hr = cmd_queue->Signal(fence, fence_value);
+	ASSERT(hr == S_OK);
+}
+
 void Frame::begin() {
 	wait();
 	timestamp_query_buffer->Map(0, nullptr, (void**)&timestamp_query_buffer_ptr);
@@ -1003,7 +1023,7 @@ void Frame::begin() {
 			u8* dst_start = dst;
 			for (u32 i = 0; i < read.num_layouts; ++i) {
 				const auto& footprint = read.layouts[i].Footprint;
-				u32 dst_row_size = footprint.Height * getSize(footprint.Format);
+				u32 dst_row_size = footprint.Width * getSize(footprint.Format);
 				for (u32 row = 0; row < footprint.Height; ++row) {
 					memcpy(dst, src + read.layouts[i].Offset + row * footprint.RowPitch, dst_row_size);
 					dst += dst_row_size;
@@ -1031,16 +1051,11 @@ void Frame::clear() {
 	stats_query_buffer->Release();
 }
 
-void captureRenderDocFrame() {
-	if (d3d->rdoc_api) {
-		if (!d3d->rdoc_api->IsRemoteAccessConnected()) {
-			d3d->rdoc_api->LaunchReplayUI(1, "");
-		}
-		d3d->rdoc_api->TriggerCapture();
-	}
+void captureFrame() {
+	d3d->frame->capture_requested = true;
 }
 
-static void try_load_renderdoc() {
+static void tryLoadRenderDoc() {
 	HMODULE lib = LoadLibrary("renderdoc.dll");
 	if (!lib) lib = LoadLibrary("C:\\Program Files\\RenderDoc\\renderdoc.dll");
 	if (!lib) return;
@@ -1049,7 +1064,6 @@ static void try_load_renderdoc() {
 		RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_0_2, (void**)&d3d->rdoc_api);
 		d3d->rdoc_api->MaskOverlayBits(~RENDERDOC_OverlayBits::eRENDERDOC_Overlay_Enabled, 0);
 	}
-	/**/
 	// FreeLibrary(lib);
 }
 
@@ -1073,19 +1087,6 @@ QueryHandle createQuery(QueryType type) {
 			return q;
 		}
 		default: ASSERT(false); return INVALID_QUERY;
-	}
-}
-
-void startCapture() {
-	if (d3d->rdoc_api) {
-		d3d->rdoc_api->StartFrameCapture(nullptr, nullptr);
-	}
-}
-
-
-void stopCapture() {
-	if (d3d->rdoc_api) {
-		d3d->rdoc_api->EndFrameCapture(nullptr, nullptr);
 	}
 }
 
@@ -1369,7 +1370,7 @@ bool isQueryReady(QueryHandle query) {
 void preinit(IAllocator& allocator, bool load_renderdoc) {
 	d3d.create(allocator);
 	d3d->srv_heap.preinit(MAX_SRV_DESCRIPTORS, 1024);
-	if (load_renderdoc) try_load_renderdoc();
+	if (load_renderdoc) tryLoadRenderDoc();
 
 	for (u32 i = 0; i < NUM_BACKBUFFERS; ++i) {
 		d3d->frames.push(allocator);
