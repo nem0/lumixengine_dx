@@ -1,6 +1,8 @@
+//https://microsoft.github.io/DirectX-Specs/
+
 #include "../external/include/SPIRV/GlslangToSpv.h"
 #include "../external/include/glslang/Public/ShaderLang.h"
-#include "../external/include/spirv_cross/spirv_hlsl.hpp"
+//#include "../external/include/spirv_cross/spirv_hlsl.hpp"
 #include "core/atomic.h"
 #include "core/array.h"
 #include "core/hash.h"
@@ -36,10 +38,6 @@
 #pragma comment(lib, "OGLCompiler.lib")
 #pragma comment(lib, "HLSL.lib")
 #pragma comment(lib, "SPIRV.lib")
-#pragma comment(lib, "spirv-cross-core.lib")
-#pragma comment(lib, "spirv-cross-cpp.lib")
-#pragma comment(lib, "spirv-cross-glsl.lib")
-#pragma comment(lib, "spirv-cross-hlsl.lib")
 
 #define USE_PIX
 #pragma comment(lib, "WinPixEventRuntime.lib")
@@ -740,7 +738,7 @@ static ID3D12Resource* createBuffer(ID3D12Device* device, const void* data, u64 
 	desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 	ID3D12Resource* upload_buffer;
 
-	const D3D12_RESOURCE_STATES state = type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
+	const D3D12_RESOURCE_STATES state = type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_GENERIC_READ;
 
 	HRESULT hr = device->CreateCommittedResource(&upload_heap_props, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&upload_buffer));
 	ASSERT(hr == S_OK);
@@ -1647,7 +1645,7 @@ bool init(void* hwnd, InitFlags flags) {
 		D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
 		queryHeapDesc.Count = TIMESTAMP_QUERY_COUNT;
 		queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-		if (!d3d->device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d->timestamp_query_heap)) == S_OK) return false;
+		if (d3d->device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d->timestamp_query_heap)) != S_OK) return false;
 		HRESULT freq_hr = d3d->cmd_queue->GetTimestampFrequency(&d3d->query_frequency);
 		if (FAILED(freq_hr)) {
 			logError("failed to get timestamp frequency, GPU timing will most likely be wrong");
@@ -1659,7 +1657,7 @@ bool init(void* hwnd, InitFlags flags) {
 		D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
 		queryHeapDesc.Count = STATS_QUERY_COUNT;
 		queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
-		if (!d3d->device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d->stats_query_heap)) == S_OK) return false;
+		if (d3d->device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&d3d->stats_query_heap)) != S_OK) return false;
 	}
 
 	return true;
@@ -1978,9 +1976,9 @@ void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const voi
 	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	desc.Flags = shader_buffer ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
 
-	HRESULT hr = d3d->device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, NULL, IID_PPV_ARGS(&buffer->resource));
+	HRESULT hr = d3d->device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, IID_PPV_ARGS(&buffer->resource));
 	ASSERT(hr == S_OK);
-	buffer->state = D3D12_RESOURCE_STATE_COMMON;
+	buffer->state = D3D12_RESOURCE_STATE_GENERIC_READ;
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 	srv_desc = {};
@@ -2019,7 +2017,7 @@ void createBuffer(BufferHandle buffer, BufferFlags flags, size_t size, const voi
 
 ProgramHandle allocProgramHandle() {
 	Program* p = LUMIX_NEW(d3d->allocator, Program)(d3d->allocator);
-	return {p};
+	return p;
 }
 
 BufferHandle allocBufferHandle() {
@@ -2467,12 +2465,12 @@ void bind(BindGroupHandle group) {
 void bindTextures(const TextureHandle* handles, u32 offset, u32 count) {
 }
 
-u32 getBindlessHandle(TextureHandle texture) {
-	return texture->heap_id;
+BindlessHandle getBindlessHandle(TextureHandle texture) {
+	return {texture->heap_id};
 }
 
-u32 getBindlessHandle(BufferHandle buffer) {
-	return buffer->heap_id;
+BindlessHandle getBindlessHandle(BufferHandle buffer) {
+	return {buffer->heap_id};
 }
 
 void drawIndirect(DataType index_type, u32 indirect_buffer_offset) {
